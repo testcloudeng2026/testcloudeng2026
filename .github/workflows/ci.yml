@@ -2,35 +2,93 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 env:
   TF_VERSION: "1.8.0"
+  AWS_REGION: us-east-1
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
 
 jobs:
   terraform:
-    name: Terraform Validate
+    name: Terraform Plan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC - read-only)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
         working-directory: terraform
 
-      # -backend=false: validates syntax and module wiring without connecting to S3
-      - name: Terraform Init (no backend)
-        run: terraform init -backend=false
+      - name: Terraform Init
+        run: terraform init
         working-directory: terraform/environments/dev
 
       - name: Terraform Validate
         run: terraform validate
         working-directory: terraform/environments/dev
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        working-directory: terraform/environments/dev
+        continue-on-error: true
+
+      - name: Post Plan as PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const raw = fs.readFileSync('terraform/environments/dev/plan_output.txt', 'utf8');
+            const plan = raw.length > 65000
+              ? raw.substring(0, 65000) + '\n\n_(output truncated — see Actions logs for full plan)_'
+              : raw;
+            const outcome = '${{ steps.plan.outcome }}';
+            const icon = outcome === 'success' ? '✅' : '❌';
+            const body = `## ${icon} Terraform Plan — \`dev\`\n\n<details><summary>Show Plan</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            for (const c of comments) {
+              if (c.body.startsWith('## ') && c.body.includes('Terraform Plan')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
 
   docker:
     name: Docker Build & Scan
