@@ -82,3 +82,44 @@ jobs:
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=120s
+
+      - name: Install NGINX Ingress Controller
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --set controller.service.type=LoadBalancer \
+            --wait \
+            --timeout=5m
+
+      - name: Wait for NLB hostname
+        run: |
+          echo "Waiting for NLB to be assigned a hostname..."
+          for i in $(seq 1 36); do
+            NLB_DNS=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$NLB_DNS" ]; then
+              echo "NLB_DNS=$NLB_DNS" >> $GITHUB_ENV
+              echo "NLB hostname: $NLB_DNS"
+              break
+            fi
+            echo "Attempt $i/36 — not ready yet, waiting 10s..."
+            sleep 10
+          done
+          if [ -z "$NLB_DNS" ]; then
+            echo "ERROR: NLB did not receive a hostname after 6 minutes"
+            exit 1
+          fi
+
+      - name: Terraform Apply (CloudFront + WAF)
+        run: |
+          terraform -chdir=terraform/environments/dev apply -auto-approve \
+            -var "nlb_dns_name=${{ env.NLB_DNS }}"
+
+      - name: Print endpoints
+        run: |
+          CF_DOMAIN=$(terraform -chdir=terraform/environments/dev output -raw cloudfront_domain 2>/dev/null || echo "not-created")
+          echo "CloudFront: https://$CF_DOMAIN"
+          echo "NLB (internal): ${{ env.NLB_DNS }}"
