@@ -1,0 +1,34 @@
+# Namespace-level ceiling: prevents a runaway deployment from consuming
+# node resources and starving other workloads.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: hello-platform-quota
+  namespace: hello-platform
+spec:
+  hard:
+    requests.cpu: "500m"
+    requests.memory: "512Mi"
+    limits.cpu: "1"
+    limits.memory: "1Gi"
+    pods: "10"
+---
+# Container-level defaults: any container without explicit requests/limits
+# inherits these, ensuring no unbounded resource consumption.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: hello-platform-limits
+  namespace: hello-platform
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: "200m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "500m"
+        memory: "512Mi"

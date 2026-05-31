@@ -1,0 +1,56 @@
+# Default deny-all: no pod can send or receive traffic unless explicitly allowed below.
+# This limits blast radius if any pod is compromised.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: hello-platform
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow the NGINX Ingress Controller to reach the app on port 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-nginx
+  namespace: hello-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: hello-platform
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+---
+# Allow outbound DNS (required for service discovery and external calls).
+# Allow outbound HTTPS to AWS APIs (ECR image pull, SSM via IRSA, CloudWatch logs).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: hello-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: hello-platform
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:
+        - port: 443
+          protocol: TCP

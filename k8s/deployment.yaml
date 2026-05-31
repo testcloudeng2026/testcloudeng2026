@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-platform
+  namespace: hello-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello-platform
+  template:
+    metadata:
+      labels:
+        app: hello-platform
+    spec:
+      serviceAccountName: hello-platform
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hello-platform
+          # Populated by CI/CD: ECR_URL from terraform output, IMAGE_TAG from github.sha
+          image: "<ECR_REPOSITORY_URL>:<IMAGE_TAG>"
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: hello-platform-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,12 @@
+# Guarantees at least 1 pod stays Running during voluntary disruptions
+# (node drains, rolling upgrades). Requires replicas >= 2 in the Deployment.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hello-platform
+  namespace: hello-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: hello-platform

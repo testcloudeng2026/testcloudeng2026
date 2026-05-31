@@ -1,0 +1,12 @@
+# Run terraform/bootstrap first to create this bucket and DynamoDB table.
+# Replace <YOUR_ACCOUNT_ID> and <KMS_KEY_ARN> with bootstrap outputs.
+terraform {
+  backend "s3" {
+    bucket         = "hello-platform-tfstate-977145922427"
+    key            = "dev/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    kms_key_id     = "arn:aws:kms:us-east-1:977145922427:key/e91d26d8-108f-4880-a270-eb5488e72930"
+    dynamodb_table = "hello-platform-tfstate-lock"
+  }
+}
