@@ -79,7 +79,14 @@ resource "aws_iam_role" "deploy" {
       Condition = {
         StringEquals = {
           (local.aud_key) = "sts.amazonaws.com"
-          (local.sub_key) = "repo:${var.github_repo}:ref:refs/heads/main"
+        }
+        # environment:dev when job uses `environment: dev`
+        # ref:refs/heads/main for direct branch pushes without environment
+        StringLike = {
+          (local.sub_key) = [
+            "repo:${var.github_repo}:environment:dev",
+            "repo:${var.github_repo}:ref:refs/heads/main"
+          ]
         }
       }
     }]
@@ -131,6 +138,7 @@ resource "aws_iam_role_policy" "deploy_infra" {
           "iam:TagOpenIDConnectProvider",
           "iam:UpdateOpenIDConnectProviderThumbprint",
           "iam:PassRole",
+          "iam:CreateServiceLinkedRole",
           "iam:CreateInstanceProfile", "iam:DeleteInstanceProfile",
           "iam:GetInstanceProfile", "iam:ListInstanceProfilesForRole",
           "iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile"
