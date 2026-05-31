@@ -2,7 +2,7 @@ name: Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
 
 env:
   AWS_REGION: us-east-1
@@ -13,8 +13,9 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  deploy-dev:
     name: Deploy to Dev
+    if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     environment: dev
     steps:
@@ -72,12 +73,10 @@ jobs:
 
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
 
-          # Patch placeholders with real values; use SHA tag (not latest) for reproducibility
           sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"              k8s/deployment.yaml
           sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"                k8s/deployment.yaml
           sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"                   k8s/serviceaccount.yaml
 
-          # Namespace must exist before all other resources
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
@@ -121,5 +120,115 @@ jobs:
       - name: Print endpoints
         run: |
           CF_DOMAIN=$(terraform -chdir=terraform/environments/dev output -raw cloudfront_domain 2>/dev/null || echo "not-created")
+          echo "CloudFront: https://$CF_DOMAIN"
+          echo "NLB (internal): ${{ env.NLB_DNS }}"
+
+  deploy-prod:
+    name: Deploy to Prod
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/environments/prod
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+        working-directory: terraform/environments/prod
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+        working-directory: terraform/environments/prod
+
+      - name: Build Docker image
+        run: docker build -t hello-platform:${{ github.sha }} app/
+
+      - name: Scan image with Trivy before pushing
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: hello-platform:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Push Docker image to ECR
+        run: |
+          ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
+          aws ecr get-login-password --region $AWS_REGION | \
+            docker login --username AWS --password-stdin "$ECR_URL"
+          docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
+          docker push "$ECR_URL:${{ github.sha }}"
+
+      - name: Deploy to EKS
+        run: |
+          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
+          ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
+          APP_ROLE=$(terraform -chdir=terraform/environments/prod output -raw app_role_arn)
+
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"              k8s/deployment.yaml
+          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"                k8s/deployment.yaml
+          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"                   k8s/serviceaccount.yaml
+
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/hello-platform \
+            -n hello-platform --timeout=300s
+
+      - name: Install NGINX Ingress Controller
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+            --namespace ingress-nginx \
+            --create-namespace \
+            --set controller.service.type=LoadBalancer \
+            --wait \
+            --timeout=5m
+
+      - name: Wait for NLB hostname
+        run: |
+          echo "Waiting for NLB to be assigned a hostname..."
+          for i in $(seq 1 36); do
+            NLB_DNS=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$NLB_DNS" ]; then
+              echo "NLB_DNS=$NLB_DNS" >> $GITHUB_ENV
+              echo "NLB hostname: $NLB_DNS"
+              break
+            fi
+            echo "Attempt $i/36 — not ready yet, waiting 10s..."
+            sleep 10
+          done
+          if [ -z "$NLB_DNS" ]; then
+            echo "ERROR: NLB did not receive a hostname after 6 minutes"
+            exit 1
+          fi
+
+      - name: Terraform Apply (CloudFront + WAF)
+        run: |
+          terraform -chdir=terraform/environments/prod apply -auto-approve \
+            -var "nlb_dns_name=${{ env.NLB_DNS }}"
+
+      - name: Print endpoints
+        run: |
+          CF_DOMAIN=$(terraform -chdir=terraform/environments/prod output -raw cloudfront_domain 2>/dev/null || echo "not-created")
           echo "CloudFront: https://$CF_DOMAIN"
           echo "NLB (internal): ${{ env.NLB_DNS }}"
