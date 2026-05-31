@@ -81,7 +81,7 @@ jobs:
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
-            -n hello-platform --timeout=120s
+            -n hello-platform --timeout=300s
 
       - name: Install NGINX Ingress Controller
         run: |
