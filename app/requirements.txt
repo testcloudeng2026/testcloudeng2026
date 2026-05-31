@@ -1,3 +1,2 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-starlette>=0.40.0  # CVE-2024-47874 fix — DoS via multipart/form-data
+fastapi>=0.115.5
+uvicorn[standard]>=0.30.0
