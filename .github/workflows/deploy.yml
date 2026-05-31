@@ -77,6 +77,8 @@ jobs:
           sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"                k8s/deployment.yaml
           sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"                   k8s/serviceaccount.yaml
 
+          # Namespace must exist before all other resources
+          kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=120s
