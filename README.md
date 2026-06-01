@@ -77,7 +77,7 @@ feature/* ──→ develop ─────────────────�
 |---|---|---|
 | `feature/*` | None | — |
 | `develop` | 1 reviewer + CI required | dev account (auto) |
-| `main` | 2 reviewers + CI required + dismiss stale | prod account (after approval gate) |
+| `main` | 1 reviewer + CI required + dismiss stale | prod account (after approval gate) |
 
 Push directly to `main` or `develop` is **blocked** — all changes go through pull requests.
 
@@ -226,7 +226,7 @@ The CI pipeline runs automatically on the PR. Once approved and merged, the depl
 
 ### To promote to production
 
-Open a PR from `develop` to `main`. Requires 2 reviewers. After merge, a manual approval gate in the `prod` GitHub environment must be clicked before the deploy runs.
+Open a PR from `develop` to `main`. Requires 1 reviewer. After merge, a manual approval gate in the `prod` GitHub environment must be clicked before the deploy runs.
 
 ---
 

@@ -137,7 +137,7 @@ Member accounts access the management account state bucket via cross-account S3 
                        │
                        └─ Pull Request → main
                                 │
-                                ├── CI (same checks) + 2 reviewer approvals
+                                ├── CI (same checks) + 1 reviewer approval
                                 └──────── merge
                                               │
                                          ⏸ Approval gate
@@ -164,7 +164,7 @@ Member accounts access the management account state bucket via cross-account S3 
 | CI/CD credentials | GitHub OIDC only — zero IAM access keys stored in GitHub secrets |
 | Deploy role scope | Trust policy locked to `repo:org/repo:environment:dev` (or prod) — no wildcard |
 | PR to develop | 1 reviewer + 3 CI checks required |
-| PR to main | 2 reviewers + 3 CI checks + dismiss stale reviews |
+| PR to main | 1 reviewer + 3 CI checks + dismiss stale reviews |
 | Prod deploy | Additional manual approval gate in GitHub environment |
 | State access | Cross-account S3 + KMS policy — only deploy roles of member accounts can read/write |
 | Image scanning | Trivy blocks push on HIGH/CRITICAL CVEs + ECR scan on push |
