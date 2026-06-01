@@ -65,20 +65,21 @@ jobs:
           docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
           docker push "$ECR_URL:${{ github.sha }}"
 
-      - name: Remove NGINX Ingress (one-time cleanup)
-        run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
-          helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
-          kubectl delete namespace ingress-nginx --ignore-not-found=true
-          kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
-
-      - name: Install AWS Load Balancer Controller
+      - name: Setup ingress controllers
         run: |
           LBC_ROLE=$(terraform -chdir=terraform/environments/dev output -raw lbc_role_arn)
           CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
           VPC_ID=$(terraform -chdir=terraform/environments/dev output -raw vpc_id)
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+          # Remove NGINX (replaced by ALB)
+          helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
+          kubectl delete namespace ingress-nginx --ignore-not-found=true
+          kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
+
+          # Delete stale LBC webhooks so LBC regenerates a fresh TLS cert on upgrade
+          kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+          kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
 
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
