@@ -1,14 +1,14 @@
 locals {
-  origin_id = "nlb-nginx-origin"
+  origin_id = "alb-origin"
 }
 
 resource "aws_cloudfront_distribution" "this" {
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "${var.name} — WAF-protected edge for NGINX/NLB origin"
+  comment         = "${var.name} — CloudFront edge in front of ALB origin"
   price_class     = var.price_class
 
-  # ── Origin: NGINX NLB ──────────────────────────────────────────────────────
+  # ── Origin: ALB ────────────────────────────────────────────────────────────
   origin {
     domain_name = var.origin_dns_name
     origin_id   = local.origin_id

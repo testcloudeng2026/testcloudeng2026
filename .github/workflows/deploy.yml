@@ -72,7 +72,7 @@ jobs:
           VPC_ID=$(terraform -chdir=terraform/environments/dev output -raw vpc_id)
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
 
-          # Remove NGINX (replaced by ALB)
+          # Clean up legacy ingress-nginx if still present in the cluster
           helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
           kubectl delete namespace ingress-nginx --ignore-not-found=true
           kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true

@@ -247,24 +247,24 @@ Management account (`977145922427`) holds only Terraform state, OIDC providers, 
 
 ### Compute — EKS over ECS/Fargate
 
-Amrize is migrating to GCP. Kubernetes manifests, NGINX Ingress, and IRSA map 1:1 to GKE/Workload Identity. ECS task definitions do not.
+Amrize is migrating to GCP. Kubernetes Deployments, Services, and IRSA map 1:1 to GKE/Workload Identity. ECS task definitions do not.
 
 | Concern | ECS/Fargate | **EKS** |
 |---|---|---|
 | Multi-cloud portability | None | **Full — same manifests on GKE** |
 | Pod identity | Task role (AWS only) | **IRSA → GKE Workload Identity** |
-| Ingress | ALB (AWS only) | **NGINX (cloud-agnostic)** |
+| Ingress | ALB (AWS only) | **ALB (AWS) / GKE Ingress (GCP)** |
 | Approx. cost | ~$50/month | ~$150/month |
 
-The $100/month premium buys a portable platform that migrates to GKE without manifest rewrites.
+The $100/month premium buys a portable platform that migrates to GKE without pod-level manifest rewrites.
 
-### Ingress — NGINX over AWS Load Balancer Controller
+### Ingress — AWS Load Balancer Controller + WAF Regional
 
-AWS LBC uses AWS-specific Ingress annotations (`alb.ingress.kubernetes.io/...`) that don't exist on GKE. NGINX uses standard `networking.k8s.io/v1` — the same YAML deploys unchanged on GKE.
+AWS LBC creates an ALB directly from the Kubernetes Ingress resource. WAF v2 is attached directly to the ALB via the `alb.ingress.kubernetes.io/wafv2-acl-arn` annotation, providing HTTP-layer protection (SQLi, XSS, IP reputation, rate limiting) without requiring CloudFront.
 
-### WAF via CloudFront (not ALB)
+### WAF via ALB (not CloudFront)
 
-AWS WAF v2 cannot attach to an NLB (Layer 4). CloudFront sits in front of the NLB and provides WAF inspection at the edge, Shield Standard (free DDoS protection), and TLS termination — all before traffic enters the VPC.
+AWS WAF v2 Regional scope attaches directly to an ALB, providing protection at the load balancer layer before traffic reaches the pods. The `cloudfront/` Terraform module is available in the repo for future use if a CDN layer is needed.
 
 WAF rule set:
 

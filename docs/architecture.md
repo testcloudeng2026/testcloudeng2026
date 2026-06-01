@@ -31,52 +31,45 @@ Member accounts access the management account state bucket via cross-account S3 
 ## Network & Application Flow (per environment account)
 
 ```
-                         ┌──────────────────────────────┐
-  Internet               │  AWS CloudFront (Global Edge) │
-     │                   │  ┌──────────────────────────┐ │
-     │  HTTPS (443)      │  │   AWS WAF WebACL          │ │
-     ▼                   │  │   • Common rule set       │ │
- ┌───────┐               │  │   • Known bad inputs      │ │
- │ Users │──────────────▶│  │   • IP reputation list    │ │
- └───────┘               │  │   • Rate limit (2000/5min)│ │
-                         │  └──────────────┬────────────┘ │
-                         │  Shield Standard│(free DDoS)   │
-                         └─────────────────┼──────────────┘
-                                           │ HTTPS origin
-                        ┌──────────────────▼──────────────────────────────────┐
-                        │           AWS VPC (10.0.0.0/21 — 2,048 IPs)        │
-                        │                                                     │
-                        │  ┌──────────────────────────────────────────────┐  │
-                        │  │  Public Subnets /27 — 32 IPs each (AZ-a/b)  │  │
-                        │  │                                              │  │
-                        │  │   ┌─────────────┐       ┌──────────────┐    │  │
-                        │  │   │  NAT Gateway│       │     NLB      │    │  │
-                        │  │   │  (AZ-a)     │       │(NGINX Ingress│    │  │
-                        │  │   └──────┬──────┘       │  Service)    │    │  │
-                        │  │          │ (outbound)    └──────┬───────┘   │  │
-                        │  └──────────┼────────────────────── ┼──────────┘  │
-                        │             │                        │             │
-                        │  ┌──────────┼────────────────────────┼──────────┐ │
-                        │  │  Private Subnets /24 — 256 IPs each (AZ-a/b)│ │
-                        │  │          ▼              NodePort  ▼          │ │
-                        │  │   ┌─────────────────────────────────────┐    │ │
-                        │  │   │          EKS Worker Nodes           │    │ │
-                        │  │   │  (t3.small dev / t3.medium prod)    │    │ │
-                        │  │   │  ┌───────────────────────────────┐  │    │ │
-                        │  │   │  │     NGINX Ingress Pod         │  │    │ │
-                        │  │   │  └────────────────┬──────────────┘  │    │ │
-                        │  │   │  ┌────────────────▼──────────────┐  │    │ │
-                        │  │   │  │     hello-platform Pod (×2)   │  │    │ │
-                        │  │   │  │  NetworkPolicy: deny-all +    │  │    │ │
-                        │  │   │  │  allow only from ingress-nginx │  │    │ │
-                        │  │   │  │  IRSA → SSM /hello-platform/* │  │    │ │
-                        │  │   │  └───────────────────────────────┘  │    │ │
-                        │  │   └─────────────────────────────────────┘    │ │
-                        │  └──────────────────────────────────────────────┘ │
-                        └─────────────────────────────────────────────────────┘
+  Internet
+     │
+     │  HTTP (80)
+     ▼
+ ┌───────┐
+ │ Users │──────────────────────────────────────────────────────────────┐
+ └───────┘                                                              │
+                        ┌──────────────────────────────────────────────▼──┐
+                        │           AWS VPC (10.0.0.0/21 — 2,048 IPs)    │
+                        │                                                 │
+                        │  ┌────────────────────────────────────────────┐ │
+                        │  │  Public Subnets /27 — 32 IPs each (AZ-a/b) │ │
+                        │  │                                            │ │
+                        │  │   ┌─────────────┐   ┌──────────────────┐  │ │
+                        │  │   │  NAT Gateway│   │  ALB + WAF       │  │ │
+                        │  │   │  (AZ-a)     │   │  (AWS LBC)       │  │ │
+                        │  │   │             │   │  • CommonRuleSet  │  │ │
+                        │  │   └──────┬──────┘   │  • BadInputs     │  │ │
+                        │  │          │(outbound) │  • IPReputation  │  │ │
+                        │  │          │           │  • Rate limit    │  │ │
+                        │  └──────────┼───────────┴──────┬───────────┘  │ │
+                        │             │                   │ NodePort     │ │
+                        │  ┌──────────┼───────────────────┼──────────┐  │ │
+                        │  │  Private Subnets /24 — 256 IPs (AZ-a/b) │  │ │
+                        │  │          ▼                   ▼           │  │ │
+                        │  │   ┌───────────────────────────────────┐  │  │ │
+                        │  │   │        EKS Worker Nodes           │  │  │ │
+                        │  │   │  (t3.small dev / t3.medium prod)  │  │  │ │
+                        │  │   │  ┌─────────────────────────────┐  │  │  │ │
+                        │  │   │  │  hello-platform Pod (×2)    │  │  │  │ │
+                        │  │   │  │  NetworkPolicy: deny-all +  │  │  │  │ │
+                        │  │   │  │  allow from VPC CIDR :8080  │  │  │  │ │
+                        │  │   │  │  IRSA → SSM /hello-platform │  │  │  │ │
+                        │  │   │  └─────────────────────────────┘  │  │  │ │
+                        │  │   └───────────────────────────────────┘  │  │ │
+                        │  └───────────────────────────────────────────┘  │ │
+                        └─────────────────────────────────────────────────┘ │
+                                                                             │
 ```
-
-> **Note:** CloudFront + WAF activate automatically once the member account is verified by AWS Support. Until then the app is reachable directly via the NLB.
 
 ---
 
@@ -134,12 +127,12 @@ Member accounts access the management account state bucket via cross-account S3 
                   develop branch
                        │
                        └─ deploy.yml (deploy-dev job) ──────────────────────┐
-                             • tf apply → VPC, EKS, ECR, WAF               │
-                             • Docker build + Trivy + ECR push              │
-                             • kubectl apply (rolling update)               │
-                             • helm install NGINX Ingress                   │
-                             • tf apply (CloudFront + WAF)                  │
-                             Deploys to account 196209078497                │
+                             • tf apply → VPC, EKS, ECR, WAF, LBC role      │
+                             • Docker build + Trivy + ECR push               │
+                             • Install AWS Load Balancer Controller           │
+                             • kubectl apply (rolling update)                │
+                             • Register node in ALB + verify health          │
+                             Deploys to account 196209078497                 │
                        ────────────────────────────────────────────────────┘
                        │
                        └─ Pull Request → main
@@ -160,13 +153,12 @@ Member accounts access the management account state bucket via cross-account S3 
 
 | Boundary | Rule |
 |---|---|
-| Internet → app | CloudFront + WAF only (HTTPS) — NLB not directly exposed in prod |
-| CloudFront → NLB | HTTPS origin — traffic encrypted in transit inside VPC |
-| NLB → Nodes | NodePort traffic only (managed by NGINX Ingress) |
+| Internet → app | HTTP via ALB — WAF inspects every request before reaching pods |
+| ALB → Nodes | NodePort range (30000-32767) only from VPC CIDR 10.0.0.0/21 |
 | Nodes | Private subnets — no public IP assigned |
 | Node metadata | IMDSv2 required (`http_tokens = required`) — blocks SSRF credential theft |
 | Pod IAM | IRSA — each pod assumes a scoped role, no shared node instance profile |
-| Pod network | NetworkPolicy default-deny-all + explicit allowlist (ingress-nginx + DNS + 443 egress) |
+| Pod network | NetworkPolicy default-deny-all + allow from VPC CIDR on port 8080 + DNS/443 egress |
 | Container | uid=1000, `runAsNonRoot`, `readOnlyRootFilesystem`, drop ALL capabilities |
 | Secrets at rest | KMS CMK: EKS etcd encryption, EBS node volumes, S3 state bucket |
 | CI/CD credentials | GitHub OIDC only — zero IAM access keys stored in GitHub secrets |
@@ -190,10 +182,10 @@ Member accounts access the management account state bucket via cross-account S3 
   IRSA annotation              →   iam.gke.io/gcp-service-account
   ECR                          →   Artifact Registry
   CloudWatch                   →   Cloud Logging / Monitoring
-  NGINX Ingress (unchanged)    →   NGINX Ingress (unchanged)
-  k8s/ manifests (unchanged)   →   k8s/ manifests (unchanged)
+  AWS Load Balancer Controller →   GKE Ingress / Gateway API
+  k8s/ Deployment/Service      →   k8s/ Deployment/Service (unchanged)
   S3 backend                   →   GCS backend
   AWS Organizations            →   GCP Resource Hierarchy (folders)
 ```
 
-Kubernetes manifests, NGINX Ingress configuration, and IRSA annotations require zero changes to run on GKE. The only migration work is infrastructure layer (Terraform providers) and observability wiring.
+Kubernetes Deployments, Services, ConfigMaps, and IRSA service account annotations require minimal changes to run on GKE. The main migration work is the infrastructure layer (Terraform providers) and the ingress controller (ALB → GKE Ingress).
