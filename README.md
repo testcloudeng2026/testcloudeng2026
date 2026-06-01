@@ -8,7 +8,7 @@ A production-grade internal API platform on AWS EKS, delivered entirely via Terr
 
 | Environment | Account | Endpoint | WAF |
 |---|---|---|---|
-| **dev** | `196209078497` | ALB DNS printed in deploy pipeline logs | WAF Regional attached to ALB |
+| **dev** | `196209078497` | `http://k8s-hellopla-hellopla-839d47d95a-424177946.us-east-1.elb.amazonaws.com` | WAF Regional attached to ALB |
 | **prod** | `590423939674` | Not yet deployed | — |
 
 > **Note on CloudFront:** The original design used CloudFront + WAF (CLOUDFRONT scope) as the public edge.
