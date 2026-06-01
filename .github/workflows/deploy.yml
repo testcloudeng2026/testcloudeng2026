@@ -110,13 +110,15 @@ jobs:
           sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
 
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/
+          kubectl apply -f k8s/ --prune=false
+          kubectl delete ingress hello-platform -n hello-platform --ignore-not-found=true
+          kubectl apply -f k8s/ingress.yaml
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Wait for ALB hostname
+      - name: Wait for ALB and healthy targets
         run: |
-          echo "Waiting for ALB to be provisioned..."
+          echo "Waiting for ALB hostname..."
           for i in $(seq 1 36); do
             ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
@@ -132,6 +134,8 @@ jobs:
             echo "ERROR: ALB did not receive a hostname after 6 minutes"
             exit 1
           fi
+          echo "Waiting 30s for targets to register..."
+          sleep 30
 
       - name: Print endpoints
         run: |
@@ -230,9 +234,9 @@ jobs:
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Wait for ALB hostname
+      - name: Wait for ALB and healthy targets
         run: |
-          echo "Waiting for ALB to be provisioned..."
+          echo "Waiting for ALB hostname..."
           for i in $(seq 1 36); do
             ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
@@ -248,6 +252,8 @@ jobs:
             echo "ERROR: ALB did not receive a hostname after 6 minutes"
             exit 1
           fi
+          echo "Waiting 30s for targets to register..."
+          sleep 30
 
       - name: Print endpoints
         run: |
