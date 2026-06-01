@@ -4,11 +4,7 @@ variable "name" {
 }
 
 variable "origin_dns_name" {
-  description = <<-EOT
-    NLB DNS name created by NGINX Ingress. Obtain after NGINX deploys:
-      kubectl get svc -n ingress-nginx ingress-nginx-controller \
-        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-  EOT
+  description = "ALB DNS name to use as CloudFront origin."
   type        = string
 }
 

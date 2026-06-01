@@ -18,7 +18,7 @@ resource "aws_subnet" "public" {
   cidr_block        = var.public_subnet_cidrs[count.index]
   availability_zone = var.azs[count.index]
 
-  # NLB/ALB provisioned by NGINX ingress needs to find these subnets
+  # ALB provisioned by AWS Load Balancer Controller discovers subnets via this tag
   tags = merge(var.tags, {
     Name                     = "${var.name}-public-${count.index + 1}"
     "kubernetes.io/role/elb" = "1"
