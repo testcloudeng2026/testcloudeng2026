@@ -331,16 +331,36 @@ AWS LBC creates an ALB directly from the Kubernetes Ingress resource. WAF v2 is 
 
 ### WAF via ALB (not CloudFront)
 
-AWS WAF v2 Regional scope attaches directly to an ALB, providing protection at the load balancer layer before traffic reaches the pods. The `cloudfront/` Terraform module is available in the repo for future use if a CDN layer is needed.
+AWS WAF v2 Regional scope attaches directly to the ALB via the `alb.ingress.kubernetes.io/wafv2-acl-arn` annotation. Every HTTP/HTTPS request is inspected at the load balancer layer before reaching the pods. Default action is **allow** — only traffic matching a block rule is rejected.
 
-WAF rule set:
+Defined in `terraform/modules/waf/main.tf`.
 
-| Priority | Rule | Threat blocked |
-|---|---|---|
-| 1 | AWSManagedRulesCommonRuleSet | SQLi, XSS, OWASP Top 10 |
-| 2 | AWSManagedRulesKnownBadInputsRuleSet | Log4Shell, SSRF |
-| 3 | AWSManagedRulesAmazonIpReputationList | Botnets, threat-actor IPs |
-| 4 | Rate limit 2,000 req / 5 min per IP | Brute force, credential stuffing |
+#### WAF Rules (evaluated in priority order)
+
+| Priority | Rule | Vendor | Mode | What it blocks |
+|---|---|---|---|---|
+| 1 | `AWSManagedRulesCommonRuleSet` | AWS | Block | SQLi, XSS, path traversal, OWASP Top 10 patterns, oversized bodies |
+| 2 | `AWSManagedRulesKnownBadInputsRuleSet` | AWS | Block | Log4Shell (CVE-2021-44228), SSRF probes, exploit kit signatures |
+| 3 | `AWSManagedRulesAmazonIpReputationList` | AWS | Block | IPs from botnets, scrapers, and threat actors (Amazon TI feed) |
+| 4 | `RateLimitPerIP` (custom) | Custom | Block | More than **2,000 requests per 5-minute window** per source IP |
+
+#### Rule details
+
+**Rule 1 — CommonRuleSet**
+Covers the most common web attack patterns: SQL injection in query strings and bodies, cross-site scripting (XSS), local file inclusion (LFI), server-side request forgery patterns, and requests with oversized bodies. This is the primary OWASP Top 10 defense layer.
+
+**Rule 2 — KnownBadInputsRuleSet**
+Blocks requests matching known exploit patterns including Log4Shell payload strings in any part of the request, SSRF attempts targeting cloud metadata endpoints (169.254.169.254), and patterns associated with common exploit frameworks.
+
+**Rule 3 — AmazonIpReputationList**
+Uses Amazon's own threat intelligence feed to block traffic from IP addresses associated with botnets, anonymous proxies, Tor exit nodes, and known malicious actors. Updated continuously by AWS.
+
+**Rule 4 — RateLimitPerIP (custom)**
+Counts all requests from a single IP over a rolling 5-minute window. Requests exceeding 2,000 are blocked with HTTP 403 until the window resets. Protects against brute force, credential stuffing, and volumetric application-layer attacks.
+
+#### WAF observability
+
+All sampled requests (blocked and allowed) are captured in CloudWatch. Blocked requests include the matching rule name, source IP, and request details — visible in the WAF console under **Sampled requests** or via CloudWatch Logs if logging is enabled.
 
 ### Terraform state — centralized in management account
 
