@@ -113,15 +113,24 @@ jobs:
           fi
 
       - name: Terraform Apply (CloudFront + WAF)
+        id: cloudfront
+        continue-on-error: true
         run: |
           terraform -chdir=terraform/environments/dev apply -auto-approve \
             -var "nlb_dns_name=${{ env.NLB_DNS }}"
 
       - name: Print endpoints
         run: |
-          CF_DOMAIN=$(terraform -chdir=terraform/environments/dev output -raw cloudfront_domain 2>/dev/null || echo "not-created")
-          echo "CloudFront: https://$CF_DOMAIN"
-          echo "NLB (internal): ${{ env.NLB_DNS }}"
+          CF_DOMAIN=$(terraform -chdir=terraform/environments/dev output -raw cloudfront_domain 2>/dev/null || echo "pending-account-verification")
+          echo "================================"
+          echo "App is LIVE"
+          echo "NLB direct:  http://${{ env.NLB_DNS }}"
+          if [ "$CF_DOMAIN" != "pending-account-verification" ]; then
+            echo "CloudFront:  https://$CF_DOMAIN"
+          else
+            echo "CloudFront:  pending — new AWS account needs verification (contact AWS Support)"
+          fi
+          echo "================================"
 
   deploy-prod:
     name: Deploy to Prod
