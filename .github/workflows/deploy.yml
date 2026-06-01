@@ -173,7 +173,7 @@ jobs:
 
           # 4. Get ALB and listener
           ALB_ARN=$(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text)
+            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text | tr -d '"')
           LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
             --query 'Listeners[0].ListenerArn' --output text)
 
@@ -399,7 +399,7 @@ jobs:
 
           # 4. Update ALB listener to instance TG (idempotent)
           ALB_ARN=$(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text)
+            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text | tr -d '"')
           LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
             --query 'Listeners[0].ListenerArn' --output text)
 
