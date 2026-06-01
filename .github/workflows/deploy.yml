@@ -69,6 +69,7 @@ jobs:
         run: |
           LBC_ROLE=$(terraform -chdir=terraform/environments/dev output -raw lbc_role_arn)
           CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
+          VPC_ID=$(terraform -chdir=terraform/environments/dev output -raw vpc_id)
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
 
           helm repo add eks https://aws.github.io/eks-charts
@@ -76,9 +77,11 @@ jobs:
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             --namespace kube-system \
             --set clusterName="$CLUSTER" \
+            --set region="$AWS_REGION" \
+            --set vpcId="$VPC_ID" \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
             --wait --timeout=5m
 
       - name: Deploy to EKS
@@ -178,60 +181,66 @@ jobs:
           docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
           docker push "$ECR_URL:${{ github.sha }}"
 
+      - name: Install AWS Load Balancer Controller
+        run: |
+          LBC_ROLE=$(terraform -chdir=terraform/environments/prod output -raw lbc_role_arn)
+          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
+          VPC_ID=$(terraform -chdir=terraform/environments/prod output -raw vpc_id)
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            --namespace kube-system \
+            --set clusterName="$CLUSTER" \
+            --set region="$AWS_REGION" \
+            --set vpcId="$VPC_ID" \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --wait --timeout=5m
+
       - name: Deploy to EKS
         run: |
           CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
           ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
           APP_ROLE=$(terraform -chdir=terraform/environments/prod output -raw app_role_arn)
+          WAF_ARN=$(terraform -chdir=terraform/environments/prod output -raw waf_web_acl_arn)
 
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
 
-          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"              k8s/deployment.yaml
-          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"                k8s/deployment.yaml
-          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"                   k8s/serviceaccount.yaml
+          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"  k8s/deployment.yaml
+          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
+          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"        k8s/serviceaccount.yaml
+          sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Install NGINX Ingress Controller
+      - name: Wait for ALB hostname
         run: |
-          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-          helm repo update
-          helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-            --namespace ingress-nginx \
-            --create-namespace \
-            --set controller.service.type=LoadBalancer \
-            --wait \
-            --timeout=5m
-
-      - name: Wait for NLB hostname
-        run: |
-          echo "Waiting for NLB to be assigned a hostname..."
+          echo "Waiting for ALB to be provisioned..."
           for i in $(seq 1 36); do
-            NLB_DNS=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
+            ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$NLB_DNS" ]; then
-              echo "NLB_DNS=$NLB_DNS" >> $GITHUB_ENV
-              echo "NLB hostname: $NLB_DNS"
+            if [ -n "$ALB_DNS" ]; then
+              echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
+              echo "ALB hostname: $ALB_DNS"
               break
             fi
             echo "Attempt $i/36 — not ready yet, waiting 10s..."
             sleep 10
           done
-          if [ -z "$NLB_DNS" ]; then
-            echo "ERROR: NLB did not receive a hostname after 6 minutes"
+          if [ -z "$ALB_DNS" ]; then
+            echo "ERROR: ALB did not receive a hostname after 6 minutes"
             exit 1
           fi
 
-      - name: Terraform Apply (CloudFront + WAF)
-        run: |
-          terraform -chdir=terraform/environments/prod apply -auto-approve \
-            -var "nlb_dns_name=${{ env.NLB_DNS }}"
-
       - name: Print endpoints
         run: |
-          CF_DOMAIN=$(terraform -chdir=terraform/environments/prod output -raw cloudfront_domain 2>/dev/null || echo "not-created")
-          echo "CloudFront: https://$CF_DOMAIN"
-          echo "NLB (internal): ${{ env.NLB_DNS }}"
+          echo "================================"
+          echo "App is LIVE with WAF protection"
+          echo "ALB + WAF: http://$ALB_DNS"
+          echo "================================"

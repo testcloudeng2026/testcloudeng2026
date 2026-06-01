@@ -18,6 +18,11 @@ output "app_role_arn" {
   value       = module.iam.app_role_arn
 }
 
+output "vpc_id" {
+  description = "VPC ID — required for AWS Load Balancer Controller"
+  value       = module.networking.vpc_id
+}
+
 output "lbc_role_arn" {
   description = "IAM role ARN for AWS Load Balancer Controller"
   value       = module.iam_lbc.role_arn
