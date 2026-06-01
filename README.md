@@ -200,6 +200,69 @@ All roles use GitHub OIDC — zero IAM access keys stored anywhere.
 
 ---
 
+## Setup Instructions
+
+### Prerequisites
+
+- AWS account with admin access (to run the one-time bootstrap)
+- AWS CLI v2 configured (`aws configure`)
+- Git + GitHub CLI (`gh auth login`)
+- A GitHub repository with Actions enabled
+
+### Step 0 — Bootstrap remote state (one-time, run locally)
+
+Creates the S3 bucket, DynamoDB lock table, and KMS key that back all Terraform state. This is the documented chicken-and-egg step — it must exist before `terraform init` can run.
+
+```bash
+cd terraform/bootstrap
+terraform init
+terraform apply
+# Outputs: bucket_name, kms_key_arn, dynamodb_table
+```
+
+### Step 1 — Create GitHub OIDC roles (one-time, run locally)
+
+Creates the IAM OIDC provider and the CI/deploy roles that GitHub Actions assumes. No IAM keys are stored.
+
+```bash
+cd terraform/github-oidc
+terraform init
+terraform apply
+# Outputs: ci_role_arn, deploy_role_arn
+```
+
+Add these two ARNs as GitHub Actions secrets:
+- `AWS_CI_ROLE_ARN` → repo-level secret
+- `AWS_DEPLOY_ROLE_ARN` → per environment (`dev`, `prod`, `management`)
+
+### Step 2 — Create AWS Organizations accounts (one-time, via pipeline)
+
+Trigger the `accounts.yml` workflow manually from GitHub Actions → **Run workflow** → action: `apply`. This creates the `dev` and `prod` member accounts inside your AWS Organization.
+
+### Step 3 — Deploy
+
+All subsequent deployments are fully automated via GitHub Actions:
+
+| Action | Result |
+|---|---|
+| Push to `develop` | Auto-deploys to dev account |
+| PR `develop → main` + approval | Deploys to prod account after gate |
+
+### Cleanup
+
+```bash
+# 1. Destroy environment infrastructure (triggers terraform destroy)
+# Go to GitHub Actions → destroy.yml → Run workflow → type DESTROY
+
+# 2. Destroy Organizations accounts (manual in AWS Console — irreversible)
+
+# 3. Destroy bootstrap state bucket (remove prevent_destroy first)
+cd terraform/bootstrap
+terraform destroy
+```
+
+---
+
 ## Onboarding a New Developer
 
 ### Prerequisites
@@ -298,6 +361,58 @@ Default Kubernetes rolling update (`maxSurge=1`) would require capacity for 3 po
 | Control plane logs | api, audit, authenticator, controllerManager, scheduler → CloudWatch |
 | VPC Flow Logs | Enabled with dedicated IAM role and log group |
 | Audit trail | CloudTrail management + data events |
+
+---
+
+## Reliability & Operations
+
+### Scaling Strategy
+
+**Current (dev):** 2 replicas on a single `t3.small` node. The PodDisruptionBudget (`minAvailable: 1`) ensures at least one pod survives voluntary drains.
+
+**Production path:**
+1. **Horizontal Pod Autoscaler** on CPU target 60% — scales pods without node changes
+2. **Node group autoscaling** `min=2, max=6` across 2 AZs — eliminates single-node SPOF
+3. **Karpenter** (long-term) — bin-packing + spot instance support reduces node cost ~60%
+
+The application is stateless by design: no session state, no local disk writes. Any replica can serve any request, so horizontal scaling is trivially safe.
+
+### Deployment and Rollback
+
+**Deploy flow (zero-downtime rolling update):**
+1. CI pushes image `ECR_URL:github.sha` — `latest` tag is never used in production
+2. `kubectl apply` triggers a rolling update: `maxUnavailable=1, maxSurge=0`
+3. Kubernetes starts the new pod and waits for the readiness probe (`GET /health → 200`)
+4. Old pod terminates only after the new pod is confirmed healthy and serving traffic
+5. If the readiness probe never passes, the rollout stalls and the old pod keeps serving
+
+**Application rollback:**
+```bash
+# Instant rollback to the previous revision
+kubectl rollout undo deployment/hello-platform -n hello-platform
+
+# Rollback to a specific revision
+kubectl rollout history deployment/hello-platform -n hello-platform
+kubectl rollout undo deployment/hello-platform --to-revision=<N> -n hello-platform
+```
+
+**Infrastructure rollback:**
+Terraform state is versioned in S3. Rolling back infrastructure means reverting the commit and running the deploy pipeline — `terraform apply` converges to the previous state.
+
+**Image rollback:**
+Every image is tagged with `github.sha` and retained in ECR (lifecycle policy keeps last 10 images). Re-deploying a previous commit re-pushes the corresponding image tag.
+
+### Key Failure Scenarios
+
+| Scenario | Detection | Response |
+|---|---|---|
+| Pod crash loop | CloudWatch alarm (`restarts > 0` × 2 periods) → SNS | `kubectl rollout undo`; investigate with `kubectl logs` |
+| Bad deploy — readiness probe fails | Rolling update stalls; old pods keep serving | `kubectl rollout undo` |
+| Node failure | EKS replaces node automatically; PDB ensures 1 pod stays Running | Multi-node group in prod eliminates this SPOF |
+| NAT Gateway failure | Pods lose outbound (ECR pulls, SSM, CloudWatch) | In prod: one NAT per AZ eliminates this SPOF |
+| WAF false positive | Legitimate request blocked (HTTP 403) | Review WAF sampled requests in CloudWatch; switch rule to Count mode temporarily |
+| Terraform state lock stuck | `terraform apply` hangs indefinitely | `terraform force-unlock <LOCK_ID>` after confirming no concurrent apply |
+| ALB target unhealthy | App unreachable; ALB returns 502 | Check pod readiness with `kubectl get pods -n hello-platform`; redeploy if needed |
 
 ---
 
