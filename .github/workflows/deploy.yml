@@ -42,7 +42,16 @@ jobs:
         working-directory: terraform/environments/dev
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: |
+          terraform apply -auto-approve tfplan
+          TF_OUT=$(terraform output -json)
+          echo "TF_CLUSTER=$(echo $TF_OUT | jq -r '.eks_cluster_name.value')"    >> $GITHUB_ENV
+          echo "TF_ECR_URL=$(echo $TF_OUT | jq -r '.ecr_repository_url.value')"  >> $GITHUB_ENV
+          echo "TF_APP_ROLE=$(echo $TF_OUT | jq -r '.app_role_arn.value')"       >> $GITHUB_ENV
+          echo "TF_WAF_ARN=$(echo $TF_OUT | jq -r '.waf_web_acl_arn.value')"    >> $GITHUB_ENV
+          echo "TF_CERT_ARN=$(echo $TF_OUT | jq -r '.acm_certificate_arn.value')" >> $GITHUB_ENV
+          echo "TF_LBC_ROLE=$(echo $TF_OUT | jq -r '.lbc_role_arn.value')"      >> $GITHUB_ENV
+          echo "TF_VPC_ID=$(echo $TF_OUT | jq -r '.vpc_id.value')"              >> $GITHUB_ENV
         working-directory: terraform/environments/dev
 
       - name: Build Docker image
@@ -59,18 +68,14 @@ jobs:
 
       - name: Push Docker image to ECR
         run: |
-          ECR_URL=$(terraform -chdir=terraform/environments/dev output -raw ecr_repository_url)
           aws ecr get-login-password --region us-east-1 | \
-            docker login --username AWS --password-stdin "$ECR_URL"
-          docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
-          docker push "$ECR_URL:${{ github.sha }}"
+            docker login --username AWS --password-stdin "$TF_ECR_URL"
+          docker tag hello-platform:${{ github.sha }} "$TF_ECR_URL:${{ github.sha }}"
+          docker push "$TF_ECR_URL:${{ github.sha }}"
 
       - name: Setup ingress controllers
         run: |
-          LBC_ROLE=$(terraform -chdir=terraform/environments/dev output -raw lbc_role_arn)
-          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
-          VPC_ID=$(terraform -chdir=terraform/environments/dev output -raw vpc_id)
-          aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1
+          aws eks update-kubeconfig --name "$TF_CLUSTER" --region us-east-1
 
           # Clean up legacy ingress-nginx if still present in the cluster
           helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
@@ -85,12 +90,12 @@ jobs:
           helm repo update
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             --namespace kube-system \
-            --set clusterName="$CLUSTER" \
-            --set region="us-east-1" \
-            --set vpcId="$VPC_ID" \
+            --set clusterName=”$TF_CLUSTER” \
+            --set region=”us-east-1” \
+            --set vpcId=”$TF_VPC_ID” \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set “serviceAccount.annotations.eks\.amazonaws\.com/role-arn”=”$TF_LBC_ROLE” \
             --set enableWebhook=false \
             --wait --timeout=5m
 
@@ -100,21 +105,15 @@ jobs:
 
       - name: Deploy to EKS
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/dev output -json eks_cluster_name | jq -r '.')
-          ECR_URL=$(terraform -chdir=terraform/environments/dev output -json ecr_repository_url | jq -r '.')
-          APP_ROLE=$(terraform -chdir=terraform/environments/dev output -json app_role_arn | jq -r '.')
-          WAF_ARN=$(terraform -chdir=terraform/environments/dev output -json waf_web_acl_arn | jq -r '.')
-          CERT_ARN=$(terraform -chdir=terraform/environments/dev output -json acm_certificate_arn | jq -r '.')
+          echo “CLUSTER=$TF_CLUSTER” >> $GITHUB_ENV
+          aws eks update-kubeconfig --name “$TF_CLUSTER” --region us-east-1
 
-          echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
-          aws eks update-kubeconfig --name “$CLUSTER” --region us-east-1
-
-          sed -i “s|<ECR_REPOSITORY_URL>|${ECR_URL}|g”  k8s/deployment.yaml
-          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”     k8s/deployment.yaml
-          sed -i “s|<APP_ROLE_ARN>|${APP_ROLE}|g”        k8s/serviceaccount.yaml
-          sed -i “s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g”      k8s/ingress.yaml
-          sed -i “s|<ACM_CERT_ARN>|${CERT_ARN}|g”        k8s/ingress.yaml
-          sed -i “s|<ENVIRONMENT>|dev|g”                  k8s/configmap.yaml
+          sed -i “s|<ECR_REPOSITORY_URL>|${TF_ECR_URL}|g”  k8s/deployment.yaml
+          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”         k8s/deployment.yaml
+          sed -i “s|<APP_ROLE_ARN>|${TF_APP_ROLE}|g”        k8s/serviceaccount.yaml
+          sed -i “s|<WAF_WEB_ACL_ARN>|${TF_WAF_ARN}|g”      k8s/ingress.yaml
+          sed -i “s|<ACM_CERT_ARN>|${TF_CERT_ARN}|g”        k8s/ingress.yaml
+          sed -i “s|<ENVIRONMENT>|dev|g”                     k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
@@ -199,7 +198,16 @@ jobs:
         working-directory: terraform/environments/prod
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: |
+          terraform apply -auto-approve tfplan
+          TF_OUT=$(terraform output -json)
+          echo “TF_CLUSTER=$(echo $TF_OUT | jq -r '.eks_cluster_name.value')”     >> $GITHUB_ENV
+          echo “TF_ECR_URL=$(echo $TF_OUT | jq -r '.ecr_repository_url.value')”   >> $GITHUB_ENV
+          echo “TF_APP_ROLE=$(echo $TF_OUT | jq -r '.app_role_arn.value')”        >> $GITHUB_ENV
+          echo “TF_WAF_ARN=$(echo $TF_OUT | jq -r '.waf_web_acl_arn.value')”     >> $GITHUB_ENV
+          echo “TF_CERT_ARN=$(echo $TF_OUT | jq -r '.acm_certificate_arn.value')” >> $GITHUB_ENV
+          echo “TF_LBC_ROLE=$(echo $TF_OUT | jq -r '.lbc_role_arn.value')”       >> $GITHUB_ENV
+          echo “TF_VPC_ID=$(echo $TF_OUT | jq -r '.vpc_id.value')”               >> $GITHUB_ENV
         working-directory: terraform/environments/prod
 
       - name: Build Docker image
@@ -211,34 +219,30 @@ jobs:
           image-ref: hello-platform:${{ github.sha }}
           format: table
           severity: HIGH,CRITICAL
-          exit-code: "1"
+          exit-code: “1”
           ignore-unfixed: true
 
       - name: Push Docker image to ECR
         run: |
-          ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
           aws ecr get-login-password --region us-east-1 | \
-            docker login --username AWS --password-stdin "$ECR_URL"
-          docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
-          docker push "$ECR_URL:${{ github.sha }}"
+            docker login --username AWS --password-stdin “$TF_ECR_URL”
+          docker tag hello-platform:${{ github.sha }} “$TF_ECR_URL:${{ github.sha }}”
+          docker push “$TF_ECR_URL:${{ github.sha }}”
 
       - name: Install AWS Load Balancer Controller
         run: |
-          LBC_ROLE=$(terraform -chdir=terraform/environments/prod output -raw lbc_role_arn)
-          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
-          VPC_ID=$(terraform -chdir=terraform/environments/prod output -raw vpc_id)
-          aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1
+          aws eks update-kubeconfig --name “$TF_CLUSTER” --region us-east-1
 
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             --namespace kube-system \
-            --set clusterName="$CLUSTER" \
-            --set region="us-east-1" \
-            --set vpcId="$VPC_ID" \
+            --set clusterName=”$TF_CLUSTER” \
+            --set region=”us-east-1” \
+            --set vpcId=”$TF_VPC_ID” \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set “serviceAccount.annotations.eks\.amazonaws\.com/role-arn”=”$TF_LBC_ROLE” \
             --set enableWebhook=false \
             --wait --timeout=5m
 
@@ -248,21 +252,15 @@ jobs:
 
       - name: Deploy to EKS
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/prod output -json eks_cluster_name | jq -r '.')
-          ECR_URL=$(terraform -chdir=terraform/environments/prod output -json ecr_repository_url | jq -r '.')
-          APP_ROLE=$(terraform -chdir=terraform/environments/prod output -json app_role_arn | jq -r '.')
-          WAF_ARN=$(terraform -chdir=terraform/environments/prod output -json waf_web_acl_arn | jq -r '.')
-          CERT_ARN=$(terraform -chdir=terraform/environments/prod output -json acm_certificate_arn | jq -r '.')
+          echo “CLUSTER=$TF_CLUSTER” >> $GITHUB_ENV
+          aws eks update-kubeconfig --name “$TF_CLUSTER” --region us-east-1
 
-          echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
-          aws eks update-kubeconfig --name “$CLUSTER” --region us-east-1
-
-          sed -i “s|<ECR_REPOSITORY_URL>|${ECR_URL}|g”  k8s/deployment.yaml
-          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”     k8s/deployment.yaml
-          sed -i “s|<APP_ROLE_ARN>|${APP_ROLE}|g”        k8s/serviceaccount.yaml
-          sed -i “s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g”      k8s/ingress.yaml
-          sed -i “s|<ACM_CERT_ARN>|${CERT_ARN}|g”        k8s/ingress.yaml
-          sed -i “s|<ENVIRONMENT>|prod|g”                 k8s/configmap.yaml
+          sed -i “s|<ECR_REPOSITORY_URL>|${TF_ECR_URL}|g”  k8s/deployment.yaml
+          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”         k8s/deployment.yaml
+          sed -i “s|<APP_ROLE_ARN>|${TF_APP_ROLE}|g”        k8s/serviceaccount.yaml
+          sed -i “s|<WAF_WEB_ACL_ARN>|${TF_WAF_ARN}|g”      k8s/ingress.yaml
+          sed -i “s|<ACM_CERT_ARN>|${TF_CERT_ARN}|g”        k8s/ingress.yaml
+          sed -i “s|<ENVIRONMENT>|prod|g”                    k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
