@@ -100,14 +100,12 @@ jobs:
 
       - name: Deploy to EKS
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
-          ECR_URL=$(terraform -chdir=terraform/environments/dev output -raw ecr_repository_url)
-          APP_ROLE=$(terraform -chdir=terraform/environments/dev output -raw app_role_arn)
-          WAF_ARN=$(terraform -chdir=terraform/environments/dev output -raw waf_web_acl_arn)
-          CERT_ARN=$(terraform -chdir=terraform/environments/dev output -raw acm_certificate_arn)
+          CLUSTER=$(terraform -chdir=terraform/environments/dev output -json eks_cluster_name | jq -r '.')
+          ECR_URL=$(terraform -chdir=terraform/environments/dev output -json ecr_repository_url | jq -r '.')
+          APP_ROLE=$(terraform -chdir=terraform/environments/dev output -json app_role_arn | jq -r '.')
+          WAF_ARN=$(terraform -chdir=terraform/environments/dev output -json waf_web_acl_arn | jq -r '.')
+          CERT_ARN=$(terraform -chdir=terraform/environments/dev output -json acm_certificate_arn | jq -r '.')
 
-          echo “DEBUG CLUSTER: '${CLUSTER}'”
-          echo “DEBUG AWS_REGION: '${AWS_REGION}'”
           echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
           aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 
@@ -250,11 +248,11 @@ jobs:
 
       - name: Deploy to EKS
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
-          ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
-          APP_ROLE=$(terraform -chdir=terraform/environments/prod output -raw app_role_arn)
-          WAF_ARN=$(terraform -chdir=terraform/environments/prod output -raw waf_web_acl_arn)
-          CERT_ARN=$(terraform -chdir=terraform/environments/prod output -raw acm_certificate_arn)
+          CLUSTER=$(terraform -chdir=terraform/environments/prod output -json eks_cluster_name | jq -r '.')
+          ECR_URL=$(terraform -chdir=terraform/environments/prod output -json ecr_repository_url | jq -r '.')
+          APP_ROLE=$(terraform -chdir=terraform/environments/prod output -json app_role_arn | jq -r '.')
+          WAF_ARN=$(terraform -chdir=terraform/environments/prod output -json waf_web_acl_arn | jq -r '.')
+          CERT_ARN=$(terraform -chdir=terraform/environments/prod output -json acm_certificate_arn | jq -r '.')
 
           echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
           aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
