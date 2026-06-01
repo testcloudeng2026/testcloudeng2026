@@ -143,19 +143,31 @@ jobs:
             --query "TargetGroups[?TargetType=='instance'].TargetGroupArn | [0]" --output text)
           echo "NodePort: $NODE_PORT  TG: $INSTANCE_TG_ARN"
 
-          # 4. Update ALB listener to instance TG (idempotent)
+          # 4. Get ALB and listener
           ALB_ARN=$(aws elbv2 describe-load-balancers \
             --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text)
           LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
             --query 'Listeners[0].ListenerArn' --output text)
-          aws elbv2 modify-listener --listener-arn "$LISTENER_ARN" \
-            --default-actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
 
-          # 5. Register node (idempotent)
+          # 5. Ensure /* forwarding rule exists pointing to instance TG (idempotent)
+          EXISTING_RULE=$(aws elbv2 describe-rules --listener-arn "$LISTENER_ARN" \
+            --query "Rules[?Actions[0].Type=='forward'].RuleArn | [0]" --output text)
+          if [ "$EXISTING_RULE" = "None" ] || [ -z "$EXISTING_RULE" ]; then
+            aws elbv2 create-rule --listener-arn "$LISTENER_ARN" --priority 1 \
+              --conditions "Field=path-pattern,Values='/*'" \
+              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+            echo "Forwarding rule created"
+          else
+            aws elbv2 modify-rule --rule-arn "$EXISTING_RULE" \
+              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+            echo "Forwarding rule updated"
+          fi
+
+          # 6. Register node (idempotent)
           aws elbv2 register-targets --target-group-arn "$INSTANCE_TG_ARN" \
             --targets "Id=$NODE_ID,Port=$NODE_PORT"
 
-          # 6. Wait for healthy target
+          # 7. Wait for healthy target
           for i in $(seq 1 18); do
             HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$INSTANCE_TG_ARN" \
               --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
@@ -167,7 +179,7 @@ jobs:
             sleep 10
           done
 
-          # 7. Get ALB DNS from AWS (reliable, no kubectl dependency)
+          # 8. Get ALB DNS from AWS
           ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
             --query 'LoadBalancers[0].DNSName' --output text)
           echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
@@ -306,14 +318,26 @@ jobs:
             --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text)
           LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
             --query 'Listeners[0].ListenerArn' --output text)
-          aws elbv2 modify-listener --listener-arn "$LISTENER_ARN" \
-            --default-actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
 
-          # 5. Register node (idempotent)
+          # 5. Ensure /* forwarding rule exists pointing to instance TG (idempotent)
+          EXISTING_RULE=$(aws elbv2 describe-rules --listener-arn "$LISTENER_ARN" \
+            --query "Rules[?Actions[0].Type=='forward'].RuleArn | [0]" --output text)
+          if [ "$EXISTING_RULE" = "None" ] || [ -z "$EXISTING_RULE" ]; then
+            aws elbv2 create-rule --listener-arn "$LISTENER_ARN" --priority 1 \
+              --conditions "Field=path-pattern,Values='/*'" \
+              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+            echo "Forwarding rule created"
+          else
+            aws elbv2 modify-rule --rule-arn "$EXISTING_RULE" \
+              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+            echo "Forwarding rule updated"
+          fi
+
+          # 6. Register node (idempotent)
           aws elbv2 register-targets --target-group-arn "$INSTANCE_TG_ARN" \
             --targets "Id=$NODE_ID,Port=$NODE_PORT"
 
-          # 6. Wait for healthy target
+          # 7. Wait for healthy target
           for i in $(seq 1 18); do
             HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$INSTANCE_TG_ARN" \
               --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
@@ -325,7 +349,7 @@ jobs:
             sleep 10
           done
 
-          # 7. Get ALB DNS from AWS
+          # 8. Get ALB DNS from AWS
           ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
             --query 'LoadBalancers[0].DNSName' --output text)
           echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
