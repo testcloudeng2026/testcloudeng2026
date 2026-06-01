@@ -5,5 +5,5 @@ metadata:
   namespace: hello-platform
 data:
   APP_NAME: "hello-platform"
-  ENVIRONMENT: "dev"
+  ENVIRONMENT: "<ENVIRONMENT>"
   VERSION: "1.0.0"

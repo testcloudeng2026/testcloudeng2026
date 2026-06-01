@@ -111,6 +111,7 @@ jobs:
           sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
           sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"        k8s/serviceaccount.yaml
           sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
+          sed -i "s|<ENVIRONMENT>|dev|g"                  k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
@@ -330,6 +331,7 @@ jobs:
           sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
           sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"        k8s/serviceaccount.yaml
           sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
+          sed -i "s|<ENVIRONMENT>|prod|g"                 k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
