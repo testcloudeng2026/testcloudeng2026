@@ -28,7 +28,7 @@ A production-grade internal API platform on AWS EKS, delivered entirely via Terr
 | Container | Docker multi-stage image, non-root uid=1000, read-only filesystem |
 | Registry | Amazon ECR — image scanning on push, lifecycle policy |
 | Compute | Amazon EKS (managed node group, private subnets, IMDSv2, encrypted EBS) |
-| Ingress | NGINX Ingress Controller → Network Load Balancer |
+| Ingress | AWS Load Balancer Controller → Application Load Balancer |
 | Edge / WAF | ALB + AWS WAF v2 Regional (SQLi, XSS, IP reputation, rate limiting) |
 | Networking | VPC `/21`, public `/27` subnets (NLB/NAT), private `/24` subnets (pods) |
 | IAM | IRSA — least-privilege pod identity; GitHub OIDC for CI/CD (no stored credentials) |
@@ -101,14 +101,14 @@ All three checks must pass before a PR can be merged.
 
 Full deploy to account `196209078497`:
 
-1. `terraform apply` — creates/updates VPC, EKS, ECR, IAM, observability, WAF
+1. `terraform apply` — creates/updates VPC, EKS, ECR, IAM, observability, WAF Regional, LBC IAM role
 2. Docker build + Trivy scan (blocking)
 3. Push image to ECR tagged with `github.sha`
-4. `kubectl apply` — deploys to EKS with rolling update (`maxUnavailable=1, maxSurge=0`)
-5. `helm upgrade --install ingress-nginx` — idempotent NGINX install
-6. Wait for NLB hostname (up to 6 min)
-7. `terraform apply -var nlb_dns_name=...` — creates CloudFront + associates WAF
-8. Prints live endpoints
+4. Install AWS Load Balancer Controller via Helm (idempotent)
+5. `kubectl apply` — deploys to EKS with rolling update (`maxUnavailable=1, maxSurge=0`)
+6. Open NodePort range in node SG + register node in ALB target group + wire forwarding rule
+7. Wait for target healthy (up to 3 min)
+8. Prints live ALB endpoint
 
 ### On merge to `main` (`deploy.yml` — Deploy to Prod)
 
@@ -165,11 +165,11 @@ All roles use GitHub OIDC — zero IAM access keys stored anywhere.
 ├── k8s/
 │   ├── namespace.yaml
 │   ├── deployment.yaml      # replicas:2, maxUnavailable:1, maxSurge:0
-│   ├── service.yaml         # ClusterIP port 8080
-│   ├── ingress.yaml         # NGINX Ingress, no host restriction (dev)
+│   ├── service.yaml         # NodePort port 8080
+│   ├── ingress.yaml         # ALB Ingress (AWS LBC) + WAF ARN annotation
 │   ├── configmap.yaml
 │   ├── serviceaccount.yaml  # IRSA annotation
-│   ├── networkpolicy.yaml   # default-deny + allow nginx + DNS/443 egress
+│   ├── networkpolicy.yaml   # default-deny + allow ALB VPC CIDR + DNS/443 egress
 │   ├── poddisruptionbudget.yaml
 │   └── resourcequota.yaml
 ├── terraform/
@@ -183,8 +183,9 @@ All roles use GitHub OIDC — zero IAM access keys stored anywhere.
 │   │   ├── iam/             # IRSA role for the app pod
 │   │   ├── kms/             # CMK with auto-rotation
 │   │   ├── observability/   # CloudWatch, GuardDuty, CloudTrail, SNS
-│   │   ├── waf/             # WAF WebACL scope CLOUDFRONT
-│   │   └── cloudfront/      # CloudFront + WAF association
+│   │   ├── waf/             # WAF WebACL scope REGIONAL (attached to ALB)
+│   │   ├── iam-lbc/         # IRSA role for AWS Load Balancer Controller
+│   │   └── cloudfront/      # CloudFront module (available, not currently deployed)
 │   └── environments/
 │       ├── dev/             # Deploys to account 196209078497
 │       └── prod/            # Deploys to account 590423939674

@@ -96,10 +96,9 @@
       "Resource": "*"
     },
     {
-      "Sid": "EdgeAndWAF",
+      "Sid": "WAF",
       "Effect": "Allow",
       "Action": [
-        "cloudfront:*",
         "wafv2:*"
       ],
       "Resource": "*"
