@@ -1,10 +1,6 @@
 # Run terraform/bootstrap first to create this bucket and DynamoDB table.
 # Replace <YOUR_ACCOUNT_ID> and <KMS_KEY_ARN> with bootstrap outputs.
 terraform {
-  required_providers {
-    tls = { source = "hashicorp/tls", version = "~> 4.0" }
-  }
-
   backend "s3" {
     bucket         = "hello-platform-tfstate-977145922427"
     key            = "dev/terraform.tfstate"
