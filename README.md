@@ -30,7 +30,7 @@ A production-grade internal API platform on AWS EKS, delivered entirely via Terr
 | Compute | Amazon EKS (managed node group, private subnets, IMDSv2, encrypted EBS) |
 | Ingress | AWS Load Balancer Controller → Application Load Balancer |
 | Edge / WAF | ALB + AWS WAF v2 Regional (SQLi, XSS, IP reputation, rate limiting) |
-| Networking | VPC `/21`, public `/27` subnets (NLB/NAT), private `/24` subnets (pods) |
+| Networking | VPC `/21`, public `/27` subnets (ALB/NAT), private `/24` subnets (pods) |
 | IAM | IRSA — least-privilege pod identity; GitHub OIDC for CI/CD (no stored credentials) |
 | Secrets | KMS CMK for EKS secrets (etcd), S3 state, and EBS volumes |
 | State | S3 (KMS-encrypted, versioned) + DynamoDB (locking) — centralized in management account |
@@ -55,7 +55,8 @@ AWS Organizations (management: 977145922427)
 │
 └── OU: prod
     └── Account: hello-platform-prod (590423939674)
-        ├── EKS cluster:   hello-platform-prod (not yet deployed)
+        ├── EKS cluster:   hello-platform-prod
+        ├── ECR:           590423939674.dkr.ecr.us-east-1.amazonaws.com/hello-platform
         └── State key:     prod/terraform.tfstate
 ```
 
@@ -107,8 +108,9 @@ Full deploy to account `196209078497`:
 4. Install AWS Load Balancer Controller via Helm (idempotent)
 5. `kubectl apply` — deploys to EKS with rolling update (`maxUnavailable=1, maxSurge=0`)
 6. Open NodePort range in node SG + register node in ALB target group + wire forwarding rule
-7. Wait for target healthy (up to 3 min)
-8. Prints live ALB endpoint
+7. Setup HTTPS listener (self-signed cert via ACM) + HTTP→HTTPS redirect (idempotent)
+8. Wait for target healthy (up to 3 min)
+9. Prints live HTTPS endpoint
 
 ### On merge to `main` (`deploy.yml` — Deploy to Prod)
 
@@ -147,7 +149,7 @@ All roles use GitHub OIDC — zero IAM access keys stored anywhere.
 | Container hardening | uid=1000, `runAsNonRoot`, `readOnlyRootFilesystem`, drop ALL caps |
 | Network isolation | NetworkPolicy default-deny-all + explicit allowlist |
 | Image scanning | Trivy HIGH/CRITICAL blocking before ECR push + ECR scan on push |
-| DDoS / rate limit | WAF WebACL 2000 req/5min per IP (via CloudFront) |
+| DDoS / rate limit | WAF WebACL 2000 req/5min per IP (via ALB) |
 | Threat detection | GuardDuty: S3, K8s audit logs, EBS malware protection |
 | Audit trail | CloudTrail management + data events |
 | State integrity | S3 versioned + DynamoDB lock + public access block |
@@ -303,14 +305,13 @@ Default Kubernetes rolling update (`maxSurge=1`) would require capacity for 3 po
 
 | Item | Status | Notes |
 |---|---|---|
-| CloudFront + WAF | Pending AWS account verification | Auto-activates on next push after verification |
-| prod environment | Not yet deployed | Waiting on CloudFront verification for prod account |
-| ACM certificate + custom domain | Not implemented | Requires Route53 hosted zone; CloudFront uses default cert for now |
+| HTTPS certificate | Self-signed (active) | Browser shows warning. Replace with ACM + custom domain for production-grade TLS |
+| Custom domain | Not implemented | Requires Route53 hosted zone; once added, ACM issues a trusted cert automatically |
 | HPA | Not implemented | `replicas: 2` provides basic HA; HPA is the obvious next step |
 | Multi-AZ NAT Gateway | Dev uses single NAT (~$45/month) | Two-line change for prod HA |
-| cert-manager | Not implemented | Automates TLS provisioning via ACM or Let's Encrypt |
 | Karpenter | Not implemented | Replaces managed node groups for better bin-packing and spot support |
 | External DNS | Not implemented | Automates Route53 records from Ingress resources |
+| LBC auto-registration | Manual step in pipeline | Node registration is scripted; long-term fix is tagging the node SG with `elbv2.k8s.aws/cluster` |
 
 ---
 
@@ -321,11 +322,11 @@ Default Kubernetes rolling update (`maxSurge=1`) would require capacity for 3 po
 | EKS control plane | $73 | $73 |
 | EC2 nodes (t3.small × 1 / t3.medium × 2) | $15 | $60 |
 | NAT Gateway | $45 | $90 (one per AZ) |
-| CloudFront | ~$2 | ~$5 |
+| ALB | ~$8 | ~$8 |
 | KMS keys | $3 | $3 |
 | GuardDuty | ~$4 | ~$4 |
 | CloudTrail | ~$2 | ~$2 |
 | ECR + S3 | <$2 | <$2 |
-| **Total** | **~$146/month** | **~$239/month** |
+| **Total** | **~$152/month** | **~$242/month** |
 
 AWS Organizations itself is free.
