@@ -8,10 +8,15 @@ A production-grade internal API platform on AWS EKS, delivered entirely via Terr
 
 | Environment | Account | Endpoint | WAF |
 |---|---|---|---|
-| **dev** | `196209078497` | `http://af10a19376e5749acb2613e70ed47b4a-1245486136.us-east-1.elb.amazonaws.com` | Pending CloudFront verification |
-| **prod** | `590423939674` | Not yet deployed | Pending CloudFront verification |
+| **dev** | `196209078497` | ALB DNS printed in deploy pipeline logs | WAF Regional attached to ALB |
+| **prod** | `590423939674` | Not yet deployed | — |
 
-> CloudFront + WAF activate automatically on the next push once AWS verifies both accounts. Tickets submitted.
+> **Note on CloudFront:** The original design used CloudFront + WAF (CLOUDFRONT scope) as the public edge.
+> New AWS accounts require manual verification by AWS Support before CloudFront resources can be created —
+> a process that can take several hours. To deliver a working WAF-protected endpoint without that delay,
+> the architecture was updated to use an **Application Load Balancer with WAF Regional scope** attached directly.
+> This provides equivalent HTTP-layer protection (SQLi, XSS, IP reputation, rate limiting) without the
+> CloudFront dependency. CloudFront can be re-introduced as an optional CDN/caching layer in the future.
 
 ---
 
@@ -24,7 +29,7 @@ A production-grade internal API platform on AWS EKS, delivered entirely via Terr
 | Registry | Amazon ECR — image scanning on push, lifecycle policy |
 | Compute | Amazon EKS (managed node group, private subnets, IMDSv2, encrypted EBS) |
 | Ingress | NGINX Ingress Controller → Network Load Balancer |
-| Edge / WAF | CloudFront + AWS WAF v2 (SQLi, XSS, IP reputation, rate limiting) |
+| Edge / WAF | ALB + AWS WAF v2 Regional (SQLi, XSS, IP reputation, rate limiting) |
 | Networking | VPC `/21`, public `/27` subnets (NLB/NAT), private `/24` subnets (pods) |
 | IAM | IRSA — least-privilege pod identity; GitHub OIDC for CI/CD (no stored credentials) |
 | Secrets | KMS CMK for EKS secrets (etcd), S3 state, and EBS volumes |

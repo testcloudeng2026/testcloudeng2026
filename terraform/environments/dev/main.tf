@@ -68,24 +68,22 @@ module "observability" {
   tags        = local.tags
 }
 
-# WAF WebACL is created on first apply (no NLB needed yet).
-# CloudFront is created on second apply, after NGINX has provisioned the NLB.
+# WAF — REGIONAL scope, attaches directly to the ALB created by AWS LBC.
 module "waf" {
   source = "../../modules/waf"
 
   name       = "${local.name}-waf"
+  scope      = "REGIONAL"
   rate_limit = var.waf_rate_limit
   tags       = local.tags
 }
 
-module "cloudfront" {
-  # Skipped until nlb_dns_name is set in terraform.tfvars after NGINX deploys.
-  count  = var.nlb_dns_name != "" ? 1 : 0
-  source = "../../modules/cloudfront"
+# IAM role for AWS Load Balancer Controller (IRSA).
+module "iam_lbc" {
+  source = "../../modules/iam-lbc"
 
-  name                = local.name
-  origin_dns_name     = var.nlb_dns_name
-  web_acl_arn         = module.waf.web_acl_arn
-  acm_certificate_arn = var.acm_certificate_arn
-  tags                = local.tags
+  cluster_name      = local.name
+  oidc_provider_arn = module.eks.oidc_provider_arn
+  oidc_provider_url = module.eks.oidc_provider_url
+  tags              = local.tags
 }
