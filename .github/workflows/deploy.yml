@@ -209,9 +209,9 @@ jobs:
 
           # 8. Ensure HTTPS listener has forwarding rule + HTTP redirects to HTTPS
           HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query “Listeners[?Port==\`443\`].ListenerArn | [0]” --output text)
+            --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text)
           HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query “Listeners[?Port==\`80\`].ListenerArn | [0]” --output text)
+            --query 'Listeners[?Port==`80`].ListenerArn | [0]' --output text)
 
           if [ -n “$HTTPS_LISTENER” ] && [ “$HTTPS_LISTENER” != “None” ]; then
             HTTPS_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTPS_LISTENER” \
@@ -435,9 +435,9 @@ jobs:
 
           # 8. Ensure HTTPS listener has forwarding rule + HTTP redirects to HTTPS
           HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query “Listeners[?Port==\`443\`].ListenerArn | [0]” --output text)
+            --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text)
           HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query “Listeners[?Port==\`80\`].ListenerArn | [0]” --output text)
+            --query 'Listeners[?Port==`80`].ListenerArn | [0]' --output text)
 
           if [ -n “$HTTPS_LISTENER” ] && [ “$HTTPS_LISTENER” != “None” ]; then
             HTTPS_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTPS_LISTENER” \
