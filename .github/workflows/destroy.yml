@@ -1,0 +1,51 @@
+name: Destroy Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to destroy"
+        required: true
+        type: choice
+        options:
+          - dev-legacy
+      confirm:
+        description: "Type DESTROY to confirm"
+        required: true
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.8.0"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  destroy:
+    name: "Destroy ${{ github.event.inputs.environment }}"
+    if: github.event.inputs.confirm == 'DESTROY'
+    runs-on: ubuntu-latest
+    environment: management
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (management account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init (dev-legacy state)
+        run: terraform init
+        working-directory: terraform/environments/dev
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
+        working-directory: terraform/environments/dev

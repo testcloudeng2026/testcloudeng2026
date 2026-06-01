@@ -1,14 +1,21 @@
 # hello-platform
 
-A production-oriented internal API platform built on AWS EKS, delivered via Terraform and GitHub Actions.
+A production-grade internal API platform on AWS EKS, delivered entirely via Terraform and GitHub Actions — no manual clicks, no stored credentials.
 
 ---
 
-## Overview
+## Live Status
 
-This repository delivers a minimal but production-oriented cloud platform foundation for a stateless internal API service. It demonstrates Infrastructure as Code, security, observability, and CI/CD practices aligned with Amrize's AWS-primary, multi-cloud-bound context.
+| Environment | Account | Endpoint | WAF |
+|---|---|---|---|
+| **dev** | `196209078497` | `http://af10a19376e5749acb2613e70ed47b4a-1245486136.us-east-1.elb.amazonaws.com` | Pending CloudFront verification |
+| **prod** | `590423939674` | Not yet deployed | Pending CloudFront verification |
 
-**What is deployed:**
+> CloudFront + WAF activate automatically on the next push once AWS verifies both accounts. Tickets submitted.
+
+---
+
+## What is deployed
 
 | Layer | Technology |
 |---|---|
@@ -19,310 +26,300 @@ This repository delivers a minimal but production-oriented cloud platform founda
 | Ingress | NGINX Ingress Controller → Network Load Balancer |
 | Edge / WAF | CloudFront + AWS WAF v2 (SQLi, XSS, IP reputation, rate limiting) |
 | Networking | VPC `/21`, public `/27` subnets (NLB/NAT), private `/24` subnets (pods) |
-| IAM | IRSA — least-privilege pod identity; GitHub OIDC for CI/CD |
+| IAM | IRSA — least-privilege pod identity; GitHub OIDC for CI/CD (no stored credentials) |
 | Secrets | KMS CMK for EKS secrets (etcd), S3 state, and EBS volumes |
-| State | S3 (KMS-encrypted, versioned) + DynamoDB (locking, PITR) |
+| State | S3 (KMS-encrypted, versioned) + DynamoDB (locking) — centralized in management account |
 | Observability | CloudWatch logs + restart alarm, GuardDuty, CloudTrail |
-| CI/CD | GitHub Actions — Terraform validate, Trivy (blocking), kubectl dry-run, deploy |
-
-See [docs/architecture.md](docs/architecture.md) for network, application flow, and security boundary diagrams.
+| Accounts | AWS Organizations — management + dev + prod member accounts |
 
 ---
 
-## Setup Instructions
+## AWS Account Structure
+
+```
+AWS Organizations (management: 977145922427)
+├── Terraform state bucket: hello-platform-tfstate-977145922427
+├── DynamoDB lock table:    hello-platform-tfstate-lock
+├── KMS CMK:               arn:aws:kms:us-east-1:977145922427:key/e91d26d8-...
+│
+├── OU: dev
+│   └── Account: hello-platform-dev (196209078497)
+│       ├── EKS cluster:   hello-platform-dev
+│       ├── ECR:           196209078497.dkr.ecr.us-east-1.amazonaws.com/hello-platform
+│       └── State key:     dev/terraform.tfstate
+│
+└── OU: prod
+    └── Account: hello-platform-prod (590423939674)
+        ├── EKS cluster:   hello-platform-prod (not yet deployed)
+        └── State key:     prod/terraform.tfstate
+```
+
+Both member accounts access the centralized state bucket via cross-account S3 + KMS policies.
+
+---
+
+## Branching Strategy
+
+```
+feature/* ──→ develop ──────────────────────────→ main
+                │                                    │
+                ▼                                    ▼
+         Auto-deploy to dev              Manual approval → deploy to prod
+         (account 196209078497)          (account 590423939674)
+```
+
+| Branch | Protection | Deploys to |
+|---|---|---|
+| `feature/*` | None | — |
+| `develop` | 1 reviewer + CI required | dev account (auto) |
+| `main` | 2 reviewers + CI required + dismiss stale | prod account (after approval gate) |
+
+Push directly to `main` or `develop` is **blocked** — all changes go through pull requests.
+
+---
+
+## CI/CD Pipelines
+
+### On every Pull Request (`ci.yml`)
+
+Triggered on PRs to `main` or `develop`. Runs without a deploy.
+
+| Job | What it does |
+|---|---|
+| **Terraform Plan** | Runs `terraform plan` against real dev state — posts diff as PR comment |
+| **Docker Build & Scan** | Builds image, runs Trivy (blocks on HIGH/CRITICAL CVEs) |
+| **K8s Dry-run** | `kubectl apply --dry-run=client` validates all manifests |
+
+All three checks must pass before a PR can be merged.
+
+### On merge to `develop` (`deploy.yml` — Deploy to Dev)
+
+Full deploy to account `196209078497`:
+
+1. `terraform apply` — creates/updates VPC, EKS, ECR, IAM, observability, WAF
+2. Docker build + Trivy scan (blocking)
+3. Push image to ECR tagged with `github.sha`
+4. `kubectl apply` — deploys to EKS with rolling update (`maxUnavailable=1, maxSurge=0`)
+5. `helm upgrade --install ingress-nginx` — idempotent NGINX install
+6. Wait for NLB hostname (up to 6 min)
+7. `terraform apply -var nlb_dns_name=...` — creates CloudFront + associates WAF
+8. Prints live endpoints
+
+### On merge to `main` (`deploy.yml` — Deploy to Prod)
+
+Same pipeline targeting account `590423939674`. Requires manual approval in the `prod` GitHub environment before execution.
+
+### Manual workflows
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| `accounts.yml` | `workflow_dispatch` (plan/apply) | Create/update AWS Organizations accounts |
+| `destroy.yml` | `workflow_dispatch` (requires typing `DESTROY`) | Destroy an environment's infrastructure |
+
+---
+
+## IAM & Security
+
+### GitHub Actions roles (no stored credentials)
+
+| Role | Account | Trust | Used by |
+|---|---|---|---|
+| `github-actions-ci-hello-platform` | `977145922427` | `pull_request` | CI plan job |
+| `github-actions-deploy-hello-platform` | `977145922427` | `environment:management` | accounts.yml, destroy.yml |
+| `github-actions-deploy-hello-platform` | `196209078497` | `environment:dev` | deploy-dev job |
+| `github-actions-deploy-hello-platform` | `590423939674` | `environment:prod` | deploy-prod job |
+
+All roles use GitHub OIDC — zero IAM access keys stored anywhere.
+
+### Security controls
+
+| Control | Implementation |
+|---|---|
+| No credentials in CI | GitHub OIDC, trust policy scoped to exact repo + environment |
+| Pod identity | IRSA — pod assumes IAM role directly, no shared node credentials |
+| SSRF → credential theft | IMDSv2 required on all nodes |
+| Secrets at rest | KMS CMK encrypts EKS etcd, EBS volumes, S3 state |
+| Container hardening | uid=1000, `runAsNonRoot`, `readOnlyRootFilesystem`, drop ALL caps |
+| Network isolation | NetworkPolicy default-deny-all + explicit allowlist |
+| Image scanning | Trivy HIGH/CRITICAL blocking before ECR push + ECR scan on push |
+| DDoS / rate limit | WAF WebACL 2000 req/5min per IP (via CloudFront) |
+| Threat detection | GuardDuty: S3, K8s audit logs, EBS malware protection |
+| Audit trail | CloudTrail management + data events |
+| State integrity | S3 versioned + DynamoDB lock + public access block |
+
+---
+
+## Repository Structure
+
+```
+.
+├── app/
+│   ├── main.py              # FastAPI: GET / + GET /health
+│   ├── requirements.txt
+│   └── Dockerfile           # multi-stage, non-root uid=1000
+├── k8s/
+│   ├── namespace.yaml
+│   ├── deployment.yaml      # replicas:2, maxUnavailable:1, maxSurge:0
+│   ├── service.yaml         # ClusterIP port 8080
+│   ├── ingress.yaml         # NGINX Ingress, no host restriction (dev)
+│   ├── configmap.yaml
+│   ├── serviceaccount.yaml  # IRSA annotation
+│   ├── networkpolicy.yaml   # default-deny + allow nginx + DNS/443 egress
+│   ├── poddisruptionbudget.yaml
+│   └── resourcequota.yaml
+├── terraform/
+│   ├── bootstrap/           # One-time: S3 + DynamoDB + KMS for state
+│   ├── github-oidc/         # One-time: OIDC provider + CI/deploy roles
+│   ├── management/          # AWS Organizations: accounts + OUs
+│   ├── modules/
+│   │   ├── networking/      # VPC, subnets, IGW, NAT GW, Flow Logs
+│   │   ├── ecr/             # ECR repo + lifecycle policy
+│   │   ├── eks/             # Cluster, node group, OIDC, IMDSv2, CW addon
+│   │   ├── iam/             # IRSA role for the app pod
+│   │   ├── kms/             # CMK with auto-rotation
+│   │   ├── observability/   # CloudWatch, GuardDuty, CloudTrail, SNS
+│   │   ├── waf/             # WAF WebACL scope CLOUDFRONT
+│   │   └── cloudfront/      # CloudFront + WAF association
+│   └── environments/
+│       ├── dev/             # Deploys to account 196209078497
+│       └── prod/            # Deploys to account 590423939674
+└── .github/workflows/
+    ├── ci.yml               # PR: tf plan comment, trivy, kubectl dry-run
+    ├── deploy.yml           # push develop→dev, push main→prod
+    ├── accounts.yml         # manual: create/update AWS accounts
+    └── destroy.yml          # manual: terraform destroy (requires DESTROY confirmation)
+```
+
+---
+
+## Onboarding a New Developer
 
 ### Prerequisites
 
-- AWS CLI v2 configured with an account you control
-- Terraform >= 1.6
-- Docker
-- `kubectl` and `helm`
-- A GitHub repository with Actions enabled
-- _(For live HTTPS with custom domain)_ A Route53 hosted zone
+- AWS CLI v2
+- Git + GitHub CLI (`gh`)
+- Access to the `testcloudeng2026` GitHub org
 
-### Step 0 — Bootstrap remote state
-
-The S3 bucket and KMS key backing Terraform state must exist before `terraform init` can run.
+### Setup
 
 ```bash
-cd terraform/bootstrap
-terraform init
-terraform apply
-# Outputs: bucket_name, kms_key_arn, dynamodb_table
+# 1. Clone
+git clone https://github.com/testcloudeng2026/testcloudeng2026
+cd testcloudeng2026
+
+# 2. Create your feature branch
+git checkout develop
+git checkout -b feature/my-change
+
+# 3. Make changes, push, open PR to develop
+git push origin feature/my-change
+gh pr create --base develop --title "feat: my change"
 ```
 
-Edit `terraform/environments/dev/backend.tf` — replace `<YOUR_ACCOUNT_ID>` and `<KMS_KEY_ARN>` with the bootstrap outputs.
+The CI pipeline runs automatically on the PR. Once approved and merged, the deploy pipeline runs automatically to the dev account.
 
-### Step 1 — Configure GitHub OIDC (one-time)
+### To promote to production
 
-GitHub Actions authenticates to AWS via OIDC — no stored credentials needed.
-
-1. Create an IAM OIDC identity provider:
-   - Provider URL: `https://token.actions.githubusercontent.com`
-   - Audience: `sts.amazonaws.com`
-
-2. Create two IAM roles trusting the OIDC provider, scoped to your repo:
-   - **CI role** (`AWS_CI_ROLE_ARN`): for pull requests (read-only AWS access)
-   - **Deploy role** (`AWS_DEPLOY_ROLE_ARN`): for pushes to `main` only
-
-   Minimum permissions for the deploy role: EKS, EC2/VPC, IAM (for IRSA), ECR, CloudWatch, KMS, S3/DynamoDB (state), WAF, CloudFront, GuardDuty, CloudTrail.
-
-3. Add both ARNs as GitHub Actions secrets: `AWS_CI_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`.
-
-### Step 2 — Deploy infrastructure (first apply)
-
-```bash
-cd terraform/environments/dev
-terraform init
-terraform plan
-terraform apply
-```
-
-Expected resources: ~50 (VPC, subnets, IGW, NAT, EKS cluster, node group, OIDC, ECR, IAM roles, KMS keys, CloudWatch, GuardDuty, CloudTrail, WAF WebACL).
-
-> **Note:** CloudFront is skipped on this first apply — the NLB DNS is not yet known. It is created in Step 3b.
-
-### Step 3 — Install NGINX Ingress Controller
-
-```bash
-aws eks update-kubeconfig --name hello-platform-dev --region us-east-1
-
-helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-helm repo update
-helm install ingress-nginx ingress-nginx/ingress-nginx \
-  --namespace ingress-nginx --create-namespace \
-  --set controller.service.type=LoadBalancer \
-  --set controller.service.annotations."service\.beta\.kubernetes\.io/aws-load-balancer-type"=nlb
-```
-
-### Step 3b — Attach WAF via CloudFront (second apply)
-
-AWS WAF cannot attach directly to an NLB. CloudFront sits in front of the NLB and WAF inspects every request at the edge before it enters your VPC.
-
-```bash
-# Wait for NLB to be provisioned (~2 min), then capture its DNS name
-NLB_DNS=$(kubectl get svc -n ingress-nginx ingress-nginx-controller \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-
-echo "nlb_dns_name = \"$NLB_DNS\"" >> terraform/environments/dev/terraform.tfvars
-
-cd terraform/environments/dev
-terraform apply   # creates CloudFront distribution + WAF association (~5 min)
-
-terraform output cloudfront_domain   # your public HTTPS endpoint
-```
-
-Traffic flow:
-```
-Internet → CloudFront (WAF) → NLB → NGINX Ingress → hello-platform pod
-```
-
-### Step 4 — Deploy the application
-
-```bash
-ECR_URL=$(terraform -chdir=terraform/environments/dev output -raw ecr_repository_url)
-APP_ROLE=$(terraform -chdir=terraform/environments/dev output -raw app_role_arn)
-
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$ECR_URL"
-docker build -t "$ECR_URL:1.0.0" app/
-docker push "$ECR_URL:1.0.0"
-
-sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g" k8s/deployment.yaml
-sed -i "s|<IMAGE_TAG>|1.0.0|g"               k8s/deployment.yaml
-sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"      k8s/serviceaccount.yaml
-
-kubectl apply -f k8s/
-kubectl rollout status deployment/hello-platform -n hello-platform
-```
-
-### Step 5 — Verify
-
-```bash
-CF_DOMAIN=$(terraform -chdir=terraform/environments/dev output -raw cloudfront_domain)
-curl https://$CF_DOMAIN/
-curl https://$CF_DOMAIN/health
-```
-
-Expected response from `/`:
-```json
-{ "application": "hello-platform", "environment": "dev", "version": "1.0.0" }
-```
-
-### Cleanup
-
-```bash
-kubectl delete -f k8s/
-terraform -chdir=terraform/environments/dev destroy
-# Bootstrap bucket has prevent_destroy = true; remove the flag then run destroy manually
-```
+Open a PR from `develop` to `main`. Requires 2 reviewers. After merge, a manual approval gate in the `prod` GitHub environment must be clicked before the deploy runs.
 
 ---
 
 ## Design Decisions
 
-### Cloud provider — AWS
+### AWS Organizations (multi-account)
 
-Amrize is AWS-primary. Starting on EKS gives immediate value on familiar ground while keeping the door open for GCP — see the Kubernetes decision below.
+Separate AWS accounts provide blast-radius isolation that resource naming cannot:
 
-### Compute — EKS over ECS/Fargate, App Runner, or EC2
+| Concern | Single account | Multi-account |
+|---|---|---|
+| `terraform destroy` blast radius | Destroys prod if wrong env | Impossible by design |
+| IAM boundaries | Soft (naming convention) | Hard (account boundary) |
+| Billing / cost attribution | Mixed | Per-account Cost Explorer |
+| Compliance (SCPs) | Same policies for all | Stricter SCPs on prod OU |
 
-ECS is an AWS-proprietary control plane. The same task definition cannot run on GCP without a rewrite. Kubernetes is the one abstraction that works identically on EKS and GKE:
+Management account (`977145922427`) holds only Terraform state, OIDC providers, and Organizations management. No workloads run there.
 
-| Concern | ECS/Fargate | App Runner | EC2 | **EKS** |
-|---|---|---|---|---|
-| Multi-cloud portability | None | None | None | **Full — same manifests on GKE** |
-| Pod identity | Task role (AWS only) | None | Instance profile | **IRSA → GKE Workload Identity** |
-| Ingress | ALB (AWS only) | Managed (no control) | Manual | **NGINX (cloud-agnostic)** |
-| Operational surface | Low | Minimal | High | Medium |
-| Dev cost (approx.) | ~$50/month | ~$20/month | Variable | **~$150/month** |
+### Compute — EKS over ECS/Fargate
 
-**Tradeoff accepted:** EKS has higher cost (~$73/month control plane) and more operational surface than ECS or App Runner. The premium is justified because: (a) the platform will host multiple services, diluting the fixed control-plane cost; (b) the company is migrating to GCP — Kubernetes manifests, NGINX Ingress, and IRSA port directly to GKE/Workload Identity without rewrite.
+Amrize is migrating to GCP. Kubernetes manifests, NGINX Ingress, and IRSA map 1:1 to GKE/Workload Identity. ECS task definitions do not.
+
+| Concern | ECS/Fargate | **EKS** |
+|---|---|---|
+| Multi-cloud portability | None | **Full — same manifests on GKE** |
+| Pod identity | Task role (AWS only) | **IRSA → GKE Workload Identity** |
+| Ingress | ALB (AWS only) | **NGINX (cloud-agnostic)** |
+| Approx. cost | ~$50/month | ~$150/month |
+
+The $100/month premium buys a portable platform that migrates to GKE without manifest rewrites.
 
 ### Ingress — NGINX over AWS Load Balancer Controller
 
-AWS Load Balancer Controller uses AWS-specific Ingress annotations that do not exist on GKE. NGINX Ingress defines behaviour in standard `networking.k8s.io/v1` Ingress resources — the same YAML deploys on GKE without change. For the same reason, WAF is attached via CloudFront (edge) rather than an ALB-specific integration.
+AWS LBC uses AWS-specific Ingress annotations (`alb.ingress.kubernetes.io/...`) that don't exist on GKE. NGINX uses standard `networking.k8s.io/v1` — the same YAML deploys unchanged on GKE.
 
-### WAF + CloudFront
+### WAF via CloudFront (not ALB)
 
-AWS WAF v2 cannot attach to a Network Load Balancer — only ALB, CloudFront, API Gateway, and AppSync are supported. CloudFront sits in front of the NLB and provides:
+AWS WAF v2 cannot attach to an NLB (Layer 4). CloudFront sits in front of the NLB and provides WAF inspection at the edge, Shield Standard (free DDoS protection), and TLS termination — all before traffic enters the VPC.
 
-- **WAF inspection at the edge** — malicious traffic is blocked before it enters the VPC
-- **AWS Shield Standard** (free) — absorbs volumetric DDoS
-- **TLS termination at the edge** — `TLSv1.2_2021` minimum
+WAF rule set:
 
-WAF rule set (evaluated in priority order):
-
-| Priority | Rule | Threat |
+| Priority | Rule | Threat blocked |
 |---|---|---|
 | 1 | AWSManagedRulesCommonRuleSet | SQLi, XSS, OWASP Top 10 |
-| 2 | AWSManagedRulesKnownBadInputsRuleSet | Log4Shell, SSRF probes |
+| 2 | AWSManagedRulesKnownBadInputsRuleSet | Log4Shell, SSRF |
 | 3 | AWSManagedRulesAmazonIpReputationList | Botnets, threat-actor IPs |
 | 4 | Rate limit 2,000 req / 5 min per IP | Brute force, credential stuffing |
 
-### Identity and secrets — IRSA, no hardcoded credentials
+### Terraform state — centralized in management account
 
-- **IRSA** (IAM Roles for Service Accounts): each pod gets a distinct IAM identity scoped to its Kubernetes service account. Instance profiles would grant all pods on a node the same permissions — IRSA prevents lateral movement between workloads.
-- **GitHub OIDC**: CI/CD assumes an IAM role via web identity federation. No IAM access keys are stored as GitHub secrets.
-- **Secret tiering**: non-sensitive config → ConfigMap; low-sensitivity params → SSM Parameter Store (read via IRSA); credentials → SSM SecureString / Secrets Manager (IRSA path `/hello-platform/*` is pre-scoped).
-- **KMS CMK** with annual auto-rotation encrypts: EKS etcd secrets, EBS node volumes, S3 state bucket. AWS managed keys are not used for any of these — customer-managed keys are required for auditability and revocation control.
+State lives in the management account S3 bucket with cross-account bucket + KMS policies allowing only the deploy roles of each member account. This avoids bootstrapping a new S3 bucket per account while keeping state isolated per environment (`dev/terraform.tfstate`, `prod/terraform.tfstate`).
 
-### VPC sizing — /21
+### Rolling update strategy — `maxUnavailable=1, maxSurge=0`
 
-A `/16` wastes 65,534 IPs and would be rejected by enterprise IPAM. A `/24` is too small for EKS — AWS VPC CNI assigns a real VPC IP per pod, and splitting a /24 into four subnets leaves private subnets with ~59 usable IPs, exhausted by 5 busy nodes.
-
-| VPC mask | Total IPs | Private subnet | Pod capacity per AZ | Verdict |
-|---|---|---|---|---|
-| `/24` | 256 | `/26` (59 usable) | ~50 pods | Too small for EKS |
-| `/22` | 1,024 | `/24` (251 usable) | ~240 pods | Acceptable, tight |
-| **`/21`** | **2,048** | **`/24` (251 usable)** | **~240 pods + reserve** | **Recommended** |
-| `/20` | 4,096 | `/23` (507 usable) | ~500 pods | Wasteful in IPAM |
-
-Public subnets are `/27` (32 IPs) — sufficient for NAT Gateway and NLB. `10.0.6.0/23` is intentionally unallocated as reserve for future platform services within the same VPC.
-
-### Single NAT Gateway (dev)
-
-One NAT Gateway costs ~$45/month and creates an AZ dependency for outbound traffic. Production requires one per AZ for HA. This is a two-line change in the `networking` module (`aws_nat_gateway` + per-AZ EIP using `count`). Documented as a deliberate dev cost tradeoff.
-
-### Terraform state
-
-S3 bucket with KMS CMK encryption, versioning, and all public access blocked. DynamoDB with pay-per-request billing and point-in-time recovery provides atomic locking. Bootstrap config is isolated (separate `terraform init`) to avoid the chicken-and-egg ordering problem.
-
-### Cost awareness
-
-| Resource | Approx. monthly (dev) | Notes |
-|---|---|---|
-| EKS control plane | $73 | Fixed; amortized across multiple services in prod |
-| EC2 nodes (1× t3.small) | $15 | Scale to 2+ for prod HA |
-| NAT Gateway | $45 | Single AZ; prod needs 2× |
-| CloudFront | ~$1–5 | Pay per request; negligible for internal API |
-| KMS keys (3×) | $3 | $1/key/month |
-| GuardDuty | ~$4 | Based on log volume |
-| CloudTrail | ~$2 | First trail free per region |
-| ECR | <$1 | Lifecycle policy limits storage |
-| **Estimated total** | **~$145–155/month** | |
-
-ECS/Fargate alternative would cost ~$50/month. The $100 premium buys multi-cloud portability and a shared Kubernetes platform that can host additional services without adding another control plane.
-
-### Reusable platform capabilities
-
-These modules are designed to be consumed across the organisation without modification:
-
-| Module | What it standardises |
-|---|---|
-| `modules/networking` | VPC sizing, subnet tags for K8s LB discovery, NAT strategy |
-| `modules/eks` | Cluster version pinning, IMDSv2, OIDC, encrypted EBS |
-| `modules/iam` | IRSA trust policy template — each team gets a scoped role |
-| `modules/kms` | CMK with auto-rotation — one call per key purpose |
-| `modules/waf` | WAF WebACL with managed rule sets + rate limit |
-| `modules/cloudfront` | Edge distribution wired to WAF — reusable for any NLB origin |
-| `modules/observability` | Log retention, restart alarm, GuardDuty, CloudTrail |
+Default Kubernetes rolling update (`maxSurge=1`) would require capacity for 3 pods simultaneously on a single `t3.small` node. Setting `maxSurge=0` means one old pod is terminated before a new one starts — fitting within the node's capacity. Production should use multi-node groups where the default surge strategy works.
 
 ---
 
-## Limitations & Future Improvements
+## Observability
 
-### Deliberate omissions
-
-| Item | Reason |
+| Signal | Implementation |
 |---|---|
-| Live deployment | Not required; `terraform validate/plan` is the stated bar |
-| ACM certificate + custom domain | Requires a real Route53 hosted zone; documented as prerequisite |
-| HPA (Horizontal Pod Autoscaler) | `replicas: 2` provides basic HA; HPA is the obvious next step |
-| Multi-AZ NAT Gateway | Dev cost tradeoff (~$45/month × 2); one-line change for prod |
-| Multi-environment promotion pipeline | Pattern established in `environments/`; staging/prod replicate the same structure |
-| OPA/Gatekeeper policy enforcement | Image registry allowlist, non-root enforcement — appropriate for prod |
-| Secrets Manager full integration | SSM Parameter Store is sufficient for this app; Secrets Manager path is pre-scoped via IRSA |
-
-### With more time
-
-- **cert-manager** — automatic TLS certificate provisioning via ACM or Let's Encrypt, eliminating the manual domain prerequisite
-- **External DNS** — automatic Route53 record management from Ingress resources
-- **HPA + KEDA** — scale on request rate or queue depth, not just CPU
-- **Karpenter** — replace managed node groups for better bin-packing and spot instance support, reducing node cost ~60%
-- **Renovate Bot** — automated PRs for Terraform module updates, Docker base image bumps, and Kubernetes version upgrades
-- **AWS Config rules** — continuous compliance monitoring (encrypted volumes, public access blocks, MFA delete on S3)
-- **Multi-AZ NAT Gateway** — one gateway per AZ eliminates the outbound single point of failure
+| Pod logs | `amazon-cloudwatch-observability` addon (Fluent Bit) → `/aws/containerinsights/hello-platform-dev/application` |
+| Metrics | CloudWatch Container Insights |
+| Alarm | `pod_number_of_container_restarts > 0` for 2 periods → SNS |
+| GuardDuty | S3, K8s audit logs, EBS malware protection |
+| Control plane logs | api, audit, authenticator, controllerManager, scheduler → CloudWatch |
+| VPC Flow Logs | Enabled with dedicated IAM role and log group |
+| Audit trail | CloudTrail management + data events |
 
 ---
 
-## Reliability & Operations Analysis
+## Known Limitations & Next Steps
 
-### Scaling strategy
-
-**Current:** 2 replicas (PodDisruptionBudget guarantees `minAvailable: 1` during node drains), single `t3.small` node.
-
-**Production path:**
-1. HPA on CPU (target 60%) or request rate via KEDA
-2. Node group autoscaling: `min=2, max=6` across 2 AZs — eliminates single-node SPOF
-3. Long-term: Karpenter for bin-packing and spot instance support
-
-### Deployment and rollback
-
-Kubernetes rolling update (default): new pod must pass readiness probe on `/health` before the old one is terminated. CI/CD tags images with `github.sha` — `latest` is never used in production.
-
-**Zero-downtime sequence:**
-1. CI pushes image `ECR_URL:sha` to ECR
-2. `kubectl apply` updates the Deployment image reference
-3. Kubernetes starts new pod, waits for readiness
-4. Old pod terminates only after new pod is healthy and serving traffic
-
-**Rollback:**
-```bash
-kubectl rollout undo deployment/hello-platform -n hello-platform
-# or to a specific revision:
-kubectl rollout history deployment/hello-platform -n hello-platform
-kubectl rollout undo deployment/hello-platform --to-revision=<N> -n hello-platform
-```
-
-Infrastructure rollback: Terraform state is versioned in S3; `terraform apply` from a previous commit restores prior state.
-
-### Key failure scenarios
-
-| Scenario | Detection | Response |
+| Item | Status | Notes |
 |---|---|---|
-| Pod crash loop | CloudWatch alarm (container restarts > 0) | `kubectl rollout undo`; investigate with `kubectl logs` |
-| Bad deploy | Readiness probe blocks traffic; rolling update stalls | Rollback with `kubectl rollout undo` |
-| Node failure | EKS auto-replaces; 2 replicas across nodes prevents downtime | PDB ensures 1 pod stays Running during voluntary drains |
-| NAT Gateway failure | Pods lose outbound (ECR pulls, SSM, CloudWatch) | In prod: one NAT per AZ eliminates this SPOF |
-| WAF false positive | Legitimate request blocked (WAF 403) | Review WAF sampled requests; switch rule to Count mode |
-| State lock stuck | `terraform apply` hangs indefinitely | `terraform force-unlock <LOCK_ID>` after confirming no concurrent apply |
+| CloudFront + WAF | Pending AWS account verification | Auto-activates on next push after verification |
+| prod environment | Not yet deployed | Waiting on CloudFront verification for prod account |
+| ACM certificate + custom domain | Not implemented | Requires Route53 hosted zone; CloudFront uses default cert for now |
+| HPA | Not implemented | `replicas: 2` provides basic HA; HPA is the obvious next step |
+| Multi-AZ NAT Gateway | Dev uses single NAT (~$45/month) | Two-line change for prod HA |
+| cert-manager | Not implemented | Automates TLS provisioning via ACM or Let's Encrypt |
+| Karpenter | Not implemented | Replaces managed node groups for better bin-packing and spot support |
+| External DNS | Not implemented | Automates Route53 records from Ingress resources |
+
+---
+
+## Cost Estimate
+
+| Resource | Dev (monthly) | Prod (monthly) |
+|---|---|---|
+| EKS control plane | $73 | $73 |
+| EC2 nodes (t3.small × 1 / t3.medium × 2) | $15 | $60 |
+| NAT Gateway | $45 | $90 (one per AZ) |
+| CloudFront | ~$2 | ~$5 |
+| KMS keys | $3 | $3 |
+| GuardDuty | ~$4 | ~$4 |
+| CloudTrail | ~$2 | ~$2 |
+| ECR + S3 | <$2 | <$2 |
+| **Total** | **~$146/month** | **~$239/month** |
+
+AWS Organizations itself is free.
