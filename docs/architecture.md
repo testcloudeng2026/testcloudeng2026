@@ -33,7 +33,8 @@ Member accounts access the management account state bucket via cross-account S3 
 ```
   Internet
      │
-     │  HTTP (80)
+     │  HTTPS (443) — self-signed cert
+     │  HTTP  (80)  — redirects to HTTPS (301)
      ▼
  ┌───────┐
  │ Users │──────────────────────────────────────────────────────────────┐
@@ -153,7 +154,7 @@ Member accounts access the management account state bucket via cross-account S3 
 
 | Boundary | Rule |
 |---|---|
-| Internet → app | HTTP via ALB — WAF inspects every request before reaching pods |
+| Internet → app | HTTPS (443) via ALB — WAF inspects every request. HTTP (80) redirects 301 to HTTPS |
 | ALB → Nodes | NodePort range (30000-32767) only from VPC CIDR 10.0.0.0/21 |
 | Nodes | Private subnets — no public IP assigned |
 | Node metadata | IMDSv2 required (`http_tokens = required`) — blocks SSRF credential theft |

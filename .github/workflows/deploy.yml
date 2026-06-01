@@ -179,7 +179,55 @@ jobs:
             sleep 10
           done
 
-          # 8. Get ALB DNS from AWS
+          # 8. Setup HTTPS listener with self-signed certificate (idempotent)
+          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+            --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+
+          if [ "$HTTPS_LISTENER" = "None" ] || [ -z "$HTTPS_LISTENER" ]; then
+            # Generate self-signed certificate
+            openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
+              -keyout /tmp/key.pem -out /tmp/cert.pem \
+              -subj "/CN=hello-platform-dev.internal" 2>/dev/null
+
+            # Import to ACM
+            CERT_ARN=$(aws acm import-certificate \
+              --certificate fileb:///tmp/cert.pem \
+              --private-key fileb:///tmp/key.pem \
+              --query 'CertificateArn' --output text)
+
+            # Create HTTPS listener
+            HTTPS_LISTENER=$(aws elbv2 create-listener \
+              --load-balancer-arn "$ALB_ARN" \
+              --protocol HTTPS --port 443 \
+              --certificates "CertificateArn=$CERT_ARN" \
+              --ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06 \
+              --default-actions "Type=fixed-response,FixedResponseConfig={StatusCode=404,MessageBody=Not Found,ContentType=text/plain}" \
+              --query 'Listeners[0].ListenerArn' --output text)
+
+            # Add forwarding rule
+            aws elbv2 create-rule --listener-arn "$HTTPS_LISTENER" --priority 1 \
+              --conditions "Field=path-pattern,Values='/*'" \
+              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+
+            # Open port 443 on ALB security groups
+            for SG in $(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
+              --query 'LoadBalancers[0].SecurityGroups[]' --output text); do
+              aws ec2 authorize-security-group-ingress --group-id "$SG" \
+                --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0}]" 2>/dev/null || true
+            done
+
+            # Redirect HTTP to HTTPS
+            HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+              --query "Listeners[?Port==\`80\`].ListenerArn | [0]" --output text)
+            aws elbv2 modify-listener --listener-arn "$HTTP_LISTENER" \
+              --default-actions "Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}"
+
+            echo "HTTPS listener configured"
+          else
+            echo "HTTPS listener already exists"
+          fi
+
+          # 9. Get ALB DNS from AWS
           ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
             --query 'LoadBalancers[0].DNSName' --output text)
           echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
@@ -188,8 +236,9 @@ jobs:
       - name: Print endpoints
         run: |
           echo "================================"
-          echo "App is LIVE with WAF protection"
-          echo "ALB + WAF: http://$ALB_DNS"
+          echo "App is LIVE with WAF + HTTPS"
+          echo "HTTPS: https://$ALB_DNS  (self-signed cert — browser will show a warning)"
+          echo "HTTP:  http://$ALB_DNS   (redirects to HTTPS)"
           echo "================================"
 
   deploy-prod:
@@ -349,7 +398,49 @@ jobs:
             sleep 10
           done
 
-          # 8. Get ALB DNS from AWS
+          # 8. Setup HTTPS listener with self-signed certificate (idempotent)
+          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+            --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+
+          if [ "$HTTPS_LISTENER" = "None" ] || [ -z "$HTTPS_LISTENER" ]; then
+            openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
+              -keyout /tmp/key.pem -out /tmp/cert.pem \
+              -subj "/CN=hello-platform-prod.internal" 2>/dev/null
+
+            CERT_ARN=$(aws acm import-certificate \
+              --certificate fileb:///tmp/cert.pem \
+              --private-key fileb:///tmp/key.pem \
+              --query 'CertificateArn' --output text)
+
+            HTTPS_LISTENER=$(aws elbv2 create-listener \
+              --load-balancer-arn "$ALB_ARN" \
+              --protocol HTTPS --port 443 \
+              --certificates "CertificateArn=$CERT_ARN" \
+              --ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06 \
+              --default-actions "Type=fixed-response,FixedResponseConfig={StatusCode=404,MessageBody=Not Found,ContentType=text/plain}" \
+              --query 'Listeners[0].ListenerArn' --output text)
+
+            aws elbv2 create-rule --listener-arn "$HTTPS_LISTENER" --priority 1 \
+              --conditions "Field=path-pattern,Values='/*'" \
+              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+
+            for SG in $(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
+              --query 'LoadBalancers[0].SecurityGroups[]' --output text); do
+              aws ec2 authorize-security-group-ingress --group-id "$SG" \
+                --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0}]" 2>/dev/null || true
+            done
+
+            HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+              --query "Listeners[?Port==\`80\`].ListenerArn | [0]" --output text)
+            aws elbv2 modify-listener --listener-arn "$HTTP_LISTENER" \
+              --default-actions "Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}"
+
+            echo "HTTPS listener configured"
+          else
+            echo "HTTPS listener already exists"
+          fi
+
+          # 9. Get ALB DNS from AWS
           ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
             --query 'LoadBalancers[0].DNSName' --output text)
           echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
@@ -358,6 +449,7 @@ jobs:
       - name: Print endpoints
         run: |
           echo "================================"
-          echo "App is LIVE with WAF protection"
-          echo "ALB + WAF: http://$ALB_DNS"
+          echo "App is LIVE with WAF + HTTPS"
+          echo "HTTPS: https://$ALB_DNS  (self-signed cert — browser will show a warning)"
+          echo "HTTP:  http://$ALB_DNS   (redirects to HTTPS)"
           echo "================================"
