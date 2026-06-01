@@ -8,8 +8,10 @@ A production-grade internal API platform on AWS EKS, delivered entirely via Terr
 
 | Environment | Account | Endpoint | WAF |
 |---|---|---|---|
-| **dev** | `196209078497` | `https://k8s-hellopla-hellopla-839d47d95a-424177946.us-east-1.elb.amazonaws.com` ⚠️ self-signed | WAF Regional attached to ALB |
-| **prod** | `590423939674` | `https://k8s-hellopla-hellopla-d69416d173-1696995132.us-east-1.elb.amazonaws.com` ⚠️ self-signed | WAF Regional attached to ALB |
+| **dev** | `196209078497` | `https://k8s-hellopla-hellopla-839d47d95a-424177946.us-east-1.elb.amazonaws.com` ⚠️ | WAF Regional ✅ |
+| **prod** | `590423939674` | `https://k8s-hellopla-hellopla-d69416d173-1696995132.us-east-1.elb.amazonaws.com` ⚠️ | WAF Regional ✅ |
+
+> ⚠️ Self-signed certificate — browser will show a security warning. Click "Advanced → Proceed" to continue. Replace with ACM + custom domain for trusted TLS.
 
 > **Note on CloudFront:** The original design used CloudFront + WAF (CLOUDFRONT scope) as the public edge.
 > New AWS accounts require manual verification by AWS Support before CloudFront resources can be created —
