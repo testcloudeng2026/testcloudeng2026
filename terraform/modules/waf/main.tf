@@ -1,10 +1,6 @@
-# WAF WebACL — CLOUDFRONT scope.
-# Must be deployed in us-east-1 (CloudFront is a global service anchored to that region).
-# Association with the CloudFront distribution is handled in modules/cloudfront.
-
 resource "aws_wafv2_web_acl" "this" {
   name  = var.name
-  scope = "CLOUDFRONT"
+  scope = var.scope
 
   default_action {
     allow {}

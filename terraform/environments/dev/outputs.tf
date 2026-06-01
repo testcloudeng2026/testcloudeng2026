@@ -18,6 +18,21 @@ output "app_role_arn" {
   value       = module.iam.app_role_arn
 }
 
+output "vpc_id" {
+  description = "VPC ID — required for AWS Load Balancer Controller"
+  value       = module.networking.vpc_id
+}
+
+output "lbc_role_arn" {
+  description = "IAM role ARN for AWS Load Balancer Controller"
+  value       = module.iam_lbc.role_arn
+}
+
+output "waf_web_acl_arn" {
+  description = "WAF WebACL ARN (REGIONAL scope — attached to ALB)"
+  value       = module.waf.web_acl_arn
+}
+
 output "log_group_name" {
   description = "CloudWatch log group for application logs"
   value       = module.observability.log_group_name
@@ -26,14 +41,4 @@ output "log_group_name" {
 output "kms_eks_key_arn" {
   description = "KMS key ARN used for EKS secrets envelope encryption"
   value       = module.kms_eks.key_arn
-}
-
-output "waf_web_acl_arn" {
-  description = "WAF WebACL ARN (CLOUDFRONT scope)"
-  value       = module.waf.web_acl_arn
-}
-
-output "cloudfront_domain" {
-  description = "CloudFront domain name — use this as your public endpoint after second apply"
-  value       = var.nlb_dns_name != "" ? module.cloudfront[0].domain_name : "not yet created — set nlb_dns_name and re-apply"
 }
