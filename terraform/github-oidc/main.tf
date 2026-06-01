@@ -106,7 +106,7 @@ resource "aws_iam_role_policy" "deploy_infra" {
         Action = [
           "ec2:*", "eks:*", "ecr:*",
           "cloudwatch:*", "logs:*",
-          "cloudfront:*", "wafv2:*",
+          "wafv2:*",
           "guardduty:*", "cloudtrail:*",
           "sns:*", "kms:*", "s3:*",
           "dynamodb:*", "ssm:*",
