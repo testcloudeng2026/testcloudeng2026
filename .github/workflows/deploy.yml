@@ -106,14 +106,15 @@ jobs:
           WAF_ARN=$(terraform -chdir=terraform/environments/dev output -raw waf_web_acl_arn)
           CERT_ARN=$(terraform -chdir=terraform/environments/dev output -raw acm_certificate_arn)
 
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
+          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 
-          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"  k8s/deployment.yaml
-          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
-          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"        k8s/serviceaccount.yaml
-          sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
-          sed -i "s|<ACM_CERT_ARN>|${CERT_ARN}|g"        k8s/ingress.yaml
-          sed -i "s|<ENVIRONMENT>|dev|g"                  k8s/configmap.yaml
+          sed -i “s|<ECR_REPOSITORY_URL>|${ECR_URL}|g”  k8s/deployment.yaml
+          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”     k8s/deployment.yaml
+          sed -i “s|<APP_ROLE_ARN>|${APP_ROLE}|g”        k8s/serviceaccount.yaml
+          sed -i “s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g”      k8s/ingress.yaml
+          sed -i “s|<ACM_CERT_ARN>|${CERT_ARN}|g”        k8s/ingress.yaml
+          sed -i “s|<ENVIRONMENT>|dev|g”                  k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
@@ -122,9 +123,6 @@ jobs:
 
       - name: Open NodePort on node security group
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
-
           NODE_ID=$(aws ec2 describe-instances \
             --filters “Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned” \
                       “Name=instance-state-name,Values=running” \
@@ -256,6 +254,7 @@ jobs:
           WAF_ARN=$(terraform -chdir=terraform/environments/prod output -raw waf_web_acl_arn)
           CERT_ARN=$(terraform -chdir=terraform/environments/prod output -raw acm_certificate_arn)
 
+          echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
           aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 
           sed -i “s|<ECR_REPOSITORY_URL>|${ECR_URL}|g”  k8s/deployment.yaml
@@ -272,9 +271,6 @@ jobs:
 
       - name: Open NodePort on node security group
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
-
           NODE_ID=$(aws ec2 describe-instances \
             --filters “Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned” \
                       “Name=instance-state-name,Values=running” \
