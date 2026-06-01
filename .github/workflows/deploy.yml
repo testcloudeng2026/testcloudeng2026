@@ -106,6 +106,8 @@ jobs:
           WAF_ARN=$(terraform -chdir=terraform/environments/dev output -raw waf_web_acl_arn)
           CERT_ARN=$(terraform -chdir=terraform/environments/dev output -raw acm_certificate_arn)
 
+          echo “DEBUG CLUSTER: '${CLUSTER}'”
+          echo “DEBUG AWS_REGION: '${AWS_REGION}'”
           echo “CLUSTER=$CLUSTER” >> $GITHUB_ENV
           aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 

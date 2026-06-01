@@ -1,10 +1,3 @@
-terraform {
-  required_providers {
-    tls = { source = "hashicorp/tls", version = "~> 4.0" }
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
-  }
-}
-
 resource "tls_private_key" "this" {
   algorithm = "RSA"
   rsa_bits  = 2048

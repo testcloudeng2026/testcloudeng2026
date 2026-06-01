@@ -1,4 +1,8 @@
 terraform {
+  required_providers {
+    tls = { source = "hashicorp/tls", version = "~> 4.0" }
+  }
+
   backend "s3" {
     bucket         = "hello-platform-tfstate-977145922427"
     key            = "prod/terraform.tfstate"
