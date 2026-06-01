@@ -1,5 +1,4 @@
 # Default deny-all: no pod can send or receive traffic unless explicitly allowed below.
-# This limits blast radius if any pod is compromised.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -11,11 +10,12 @@ spec:
     - Ingress
     - Egress
 ---
-# Allow the NGINX Ingress Controller to reach the app on port 8080.
+# Allow AWS Load Balancer Controller (target-type: ip) to reach pods on port 8080.
+# ALB sends health checks and traffic directly to pod IPs from the VPC CIDR.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-ingress-from-nginx
+  name: allow-ingress-from-alb
   namespace: hello-platform
 spec:
   podSelector:
@@ -25,15 +25,13 @@ spec:
     - Ingress
   ingress:
     - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+        - ipBlock:
+            cidr: 10.0.0.0/21
       ports:
         - port: 8080
           protocol: TCP
 ---
-# Allow outbound DNS (required for service discovery and external calls).
-# Allow outbound HTTPS to AWS APIs (ECR image pull, SSM via IRSA, CloudWatch logs).
+# Allow outbound DNS and HTTPS to AWS APIs (ECR, SSM, CloudWatch via IRSA).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
