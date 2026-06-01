@@ -6,7 +6,7 @@ metadata:
   annotations:
     kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/target-type: instance
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
     # WAF ARN injected by CI/CD from terraform output waf_web_acl_arn
     alb.ingress.kubernetes.io/wafv2-acl-arn: "<WAF_WEB_ACL_ARN>"
