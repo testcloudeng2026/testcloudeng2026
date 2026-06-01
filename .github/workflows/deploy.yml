@@ -104,34 +104,9 @@ jobs:
           ECR_URL=$(terraform -chdir=terraform/environments/dev output -raw ecr_repository_url)
           APP_ROLE=$(terraform -chdir=terraform/environments/dev output -raw app_role_arn)
           WAF_ARN=$(terraform -chdir=terraform/environments/dev output -raw waf_web_acl_arn)
+          CERT_ARN=$(terraform -chdir=terraform/environments/dev output -raw acm_certificate_arn)
 
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
-
-          # Get or create self-signed cert in ACM (reuse if exists)
-          CERT_ARN=$(aws acm list-certificates \
-            --query "CertificateSummaryList[?DomainName=='hello-platform-dev.internal'].CertificateArn | [0]" \
-            --output text)
-          if [ "$CERT_ARN" = "None" ] || [ -z "$CERT_ARN" ]; then
-            openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
-              -keyout /tmp/key.pem -out /tmp/cert.pem \
-              -subj "/CN=hello-platform-dev.internal" 2>/dev/null
-            CERT_ARN=$(aws acm import-certificate \
-              --certificate fileb:///tmp/cert.pem \
-              --private-key fileb:///tmp/key.pem \
-              --query 'CertificateArn' --output text)
-            echo "New cert created: $CERT_ARN"
-          else
-            echo "Reusing existing cert: $CERT_ARN"
-          fi
-
-          # Open port 443 on ALB security groups (idempotent)
-          for SG in $(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].SecurityGroups[]" \
-            --output text); do
-            aws ec2 authorize-security-group-ingress --group-id "$SG" \
-              --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0}]" \
-              2>/dev/null || true
-          done
 
           sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"  k8s/deployment.yaml
           sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
@@ -145,100 +120,49 @@ jobs:
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Register node in ALB and verify health
+      - name: Open NodePort on node security group
         run: |
           CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 
-          # 1. Get node instance ID and security group
           NODE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned" \
-                      "Name=instance-state-name,Values=running" \
+            --filters “Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned” \
+                      “Name=instance-state-name,Values=running” \
             --query 'Reservations[0].Instances[0].InstanceId' --output text)
-          NODE_SG=$(aws ec2 describe-instances --instance-ids "$NODE_ID" \
+          NODE_SG=$(aws ec2 describe-instances --instance-ids “$NODE_ID” \
             --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
-          echo "Node: $NODE_ID  SG: $NODE_SG"
+          echo “Node: $NODE_ID  SG: $NODE_SG”
 
-          # 2. Open NodePort range from VPC CIDR (idempotent)
-          aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
-            --ip-permissions "IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]" \
-            2>/dev/null || echo "NodePort rule already exists"
+          aws ec2 authorize-security-group-ingress --group-id “$NODE_SG” \
+            --ip-permissions “IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]” \
+            2>/dev/null || echo “NodePort rule already exists”
 
-          # 3. Get NodePort and instance-type target group
-          NODE_PORT=$(kubectl get svc hello-platform -n hello-platform \
-            -o jsonpath='{.spec.ports[0].nodePort}')
-          INSTANCE_TG_ARN=$(aws elbv2 describe-target-groups \
-            --query "TargetGroups[?TargetType=='instance'].TargetGroupArn | [0]" --output text)
-          echo "NodePort: $NODE_PORT  TG: $INSTANCE_TG_ARN"
-
-          # 4. Get ALB and listener
-          ALB_ARN=$(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn" --output text | head -1)
-          LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
-            --query 'Listeners[0].ListenerArn' --output text)
-
-          # 5. Ensure /* forwarding rule exists pointing to instance TG (idempotent)
-          EXISTING_RULE=$(aws elbv2 describe-rules --listener-arn "$LISTENER_ARN" \
-            --query "Rules[?Actions[0].Type=='forward'].RuleArn | [0]" --output text)
-          if [ "$EXISTING_RULE" = "None" ] || [ -z "$EXISTING_RULE" ]; then
-            aws elbv2 create-rule --listener-arn "$LISTENER_ARN" --priority 1 \
-              --conditions "Field=path-pattern,Values='/*'" \
-              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
-            echo "Forwarding rule created"
-          else
-            aws elbv2 modify-rule --rule-arn "$EXISTING_RULE" \
-              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
-            echo "Forwarding rule updated"
+      - name: Verify app health
+        run: |
+          ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          if [ -z “$ALB_DNS” ]; then
+            ALB_DNS=$(aws elbv2 describe-load-balancers \
+              --query “LoadBalancers[?contains(LoadBalancerName,'hellopla')].DNSName | [0]” \
+              --output text)
           fi
+          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
 
-          # 6. Register node (idempotent)
-          aws elbv2 register-targets --target-group-arn "$INSTANCE_TG_ARN" \
-            --targets "Id=$NODE_ID,Port=$NODE_PORT"
-
-          # 7. Wait for healthy target
+          STATUS=”000”
           for i in $(seq 1 18); do
-            HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$INSTANCE_TG_ARN" \
-              --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
-            if [ "$HEALTH" = "healthy" ]; then
-              echo "Target is healthy"
+            STATUS=$(curl -sk -o /dev/null -w “%{http_code}” “https://${ALB_DNS}/health” 2>/dev/null || echo “000”)
+            if [ “$STATUS” = “200” ]; then
+              echo “App is healthy (HTTPS 200)”
               break
             fi
-            echo "Attempt $i/18 â€” state: $HEALTH, waiting 10s..."
+            echo “Attempt $i/18 — status: $STATUS, waiting 10s...”
             sleep 10
           done
 
-          # 8. Ensure HTTPS listener has forwarding rule + HTTP redirects to HTTPS
-          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text)
-          HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query 'Listeners[?Port==`80`].ListenerArn | [0]' --output text)
-
-          if [ -n “$HTTPS_LISTENER” ] && [ “$HTTPS_LISTENER” != “None” ]; then
-            HTTPS_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTPS_LISTENER” \
-              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
-            if [ “$HTTPS_FWD” = “None” ] || [ -z “$HTTPS_FWD” ]; then
-              aws elbv2 create-rule --listener-arn “$HTTPS_LISTENER” --priority 1 \
-                --conditions “Field=path-pattern,Values='/*'” \
-                --actions “Type=forward,TargetGroupArn=$INSTANCE_TG_ARN”
-              echo “HTTPS forwarding rule added”
-            fi
-            # Ensure HTTP redirects to HTTPS
-            HTTP_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTP_LISTENER” \
-              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
-            if [ “$HTTP_FWD” != “None” ] && [ -n “$HTTP_FWD” ]; then
-              aws elbv2 delete-rule --rule-arn “$HTTP_FWD” 2>/dev/null || true
-            fi
-            aws elbv2 modify-listener --listener-arn “$HTTP_LISTENER” \
-              --default-actions “Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}” \
-              2>/dev/null || true
-            echo “HTTP -> HTTPS redirect configured”
+          if [ “$STATUS” != “200” ]; then
+            echo “ERROR: App did not become healthy after 3 minutes”
+            exit 1
           fi
-
-          # 9. Get ALB DNS from AWS
-          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns “$ALB_ARN” \
-            --query 'LoadBalancers[0].DNSName' --output text)
-          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
-          echo “ALB DNS: $ALB_DNS”
 
       - name: Print endpoints
         run: |
@@ -330,141 +254,65 @@ jobs:
           ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
           APP_ROLE=$(terraform -chdir=terraform/environments/prod output -raw app_role_arn)
           WAF_ARN=$(terraform -chdir=terraform/environments/prod output -raw waf_web_acl_arn)
+          CERT_ARN=$(terraform -chdir=terraform/environments/prod output -raw acm_certificate_arn)
 
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 
-          # Get or create self-signed cert in ACM (reuse if exists)
-          CERT_ARN=$(aws acm list-certificates \
-            --query "CertificateSummaryList[?DomainName=='hello-platform-prod.internal'].CertificateArn | [0]" \
-            --output text)
-          if [ "$CERT_ARN" = "None" ] || [ -z "$CERT_ARN" ]; then
-            openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
-              -keyout /tmp/key.pem -out /tmp/cert.pem \
-              -subj "/CN=hello-platform-prod.internal" 2>/dev/null
-            CERT_ARN=$(aws acm import-certificate \
-              --certificate fileb:///tmp/cert.pem \
-              --private-key fileb:///tmp/key.pem \
-              --query 'CertificateArn' --output text)
-            echo "New cert created: $CERT_ARN"
-          else
-            echo "Reusing existing cert: $CERT_ARN"
-          fi
-
-          # Open port 443 on ALB security groups (idempotent)
-          for SG in $(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].SecurityGroups[]" \
-            --output text); do
-            aws ec2 authorize-security-group-ingress --group-id "$SG" \
-              --ip-permissions "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0}]" \
-              2>/dev/null || true
-          done
-
-          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"  k8s/deployment.yaml
-          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
-          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"        k8s/serviceaccount.yaml
-          sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
-          sed -i "s|<ACM_CERT_ARN>|${CERT_ARN}|g"        k8s/ingress.yaml
-          sed -i "s|<ENVIRONMENT>|prod|g"                 k8s/configmap.yaml
+          sed -i “s|<ECR_REPOSITORY_URL>|${ECR_URL}|g”  k8s/deployment.yaml
+          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”     k8s/deployment.yaml
+          sed -i “s|<APP_ROLE_ARN>|${APP_ROLE}|g”        k8s/serviceaccount.yaml
+          sed -i “s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g”      k8s/ingress.yaml
+          sed -i “s|<ACM_CERT_ARN>|${CERT_ARN}|g”        k8s/ingress.yaml
+          sed -i “s|<ENVIRONMENT>|prod|g”                 k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Register node in ALB and verify health
+      - name: Open NodePort on node security group
         run: |
           CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
 
-          # 1. Get node instance ID and security group
           NODE_ID=$(aws ec2 describe-instances \
-            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned" \
-                      "Name=instance-state-name,Values=running" \
+            --filters “Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned” \
+                      “Name=instance-state-name,Values=running” \
             --query 'Reservations[0].Instances[0].InstanceId' --output text)
-          NODE_SG=$(aws ec2 describe-instances --instance-ids "$NODE_ID" \
+          NODE_SG=$(aws ec2 describe-instances --instance-ids “$NODE_ID” \
             --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
-          echo "Node: $NODE_ID  SG: $NODE_SG"
+          echo “Node: $NODE_ID  SG: $NODE_SG”
 
-          # 2. Open NodePort range from VPC CIDR (idempotent)
-          aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
-            --ip-permissions "IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]" \
-            2>/dev/null || echo "NodePort rule already exists"
+          aws ec2 authorize-security-group-ingress --group-id “$NODE_SG” \
+            --ip-permissions “IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]” \
+            2>/dev/null || echo “NodePort rule already exists”
 
-          # 3. Get NodePort and instance-type target group
-          NODE_PORT=$(kubectl get svc hello-platform -n hello-platform \
-            -o jsonpath='{.spec.ports[0].nodePort}')
-          INSTANCE_TG_ARN=$(aws elbv2 describe-target-groups \
-            --query "TargetGroups[?TargetType=='instance'].TargetGroupArn | [0]" --output text)
-          echo "NodePort: $NODE_PORT  TG: $INSTANCE_TG_ARN"
-
-          # 4. Update ALB listener to instance TG (idempotent)
-          ALB_ARN=$(aws elbv2 describe-load-balancers \
-            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn" --output text | head -1)
-          LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
-            --query 'Listeners[0].ListenerArn' --output text)
-
-          # 5. Ensure /* forwarding rule exists pointing to instance TG (idempotent)
-          EXISTING_RULE=$(aws elbv2 describe-rules --listener-arn "$LISTENER_ARN" \
-            --query "Rules[?Actions[0].Type=='forward'].RuleArn | [0]" --output text)
-          if [ "$EXISTING_RULE" = "None" ] || [ -z "$EXISTING_RULE" ]; then
-            aws elbv2 create-rule --listener-arn "$LISTENER_ARN" --priority 1 \
-              --conditions "Field=path-pattern,Values='/*'" \
-              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
-            echo "Forwarding rule created"
-          else
-            aws elbv2 modify-rule --rule-arn "$EXISTING_RULE" \
-              --actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
-            echo "Forwarding rule updated"
+      - name: Verify app health
+        run: |
+          ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          if [ -z “$ALB_DNS” ]; then
+            ALB_DNS=$(aws elbv2 describe-load-balancers \
+              --query “LoadBalancers[?contains(LoadBalancerName,'hellopla')].DNSName | [0]” \
+              --output text)
           fi
+          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
 
-          # 6. Register node (idempotent)
-          aws elbv2 register-targets --target-group-arn "$INSTANCE_TG_ARN" \
-            --targets "Id=$NODE_ID,Port=$NODE_PORT"
-
-          # 7. Wait for healthy target
+          STATUS=”000”
           for i in $(seq 1 18); do
-            HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$INSTANCE_TG_ARN" \
-              --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
-            if [ "$HEALTH" = "healthy" ]; then
-              echo "Target is healthy"
+            STATUS=$(curl -sk -o /dev/null -w “%{http_code}” “https://${ALB_DNS}/health” 2>/dev/null || echo “000”)
+            if [ “$STATUS” = “200” ]; then
+              echo “App is healthy (HTTPS 200)”
               break
             fi
-            echo "Attempt $i/18 â€” state: $HEALTH, waiting 10s..."
+            echo “Attempt $i/18 — status: $STATUS, waiting 10s...”
             sleep 10
           done
 
-          # 8. Ensure HTTPS listener has forwarding rule + HTTP redirects to HTTPS
-          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text)
-          HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
-            --query 'Listeners[?Port==`80`].ListenerArn | [0]' --output text)
-
-          if [ -n “$HTTPS_LISTENER” ] && [ “$HTTPS_LISTENER” != “None” ]; then
-            HTTPS_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTPS_LISTENER” \
-              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
-            if [ “$HTTPS_FWD” = “None” ] || [ -z “$HTTPS_FWD” ]; then
-              aws elbv2 create-rule --listener-arn “$HTTPS_LISTENER” --priority 1 \
-                --conditions “Field=path-pattern,Values='/*'” \
-                --actions “Type=forward,TargetGroupArn=$INSTANCE_TG_ARN”
-              echo “HTTPS forwarding rule added”
-            fi
-            # Ensure HTTP redirects to HTTPS
-            HTTP_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTP_LISTENER” \
-              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
-            if [ “$HTTP_FWD” != “None” ] && [ -n “$HTTP_FWD” ]; then
-              aws elbv2 delete-rule --rule-arn “$HTTP_FWD” 2>/dev/null || true
-            fi
-            aws elbv2 modify-listener --listener-arn “$HTTP_LISTENER” \
-              --default-actions “Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}” \
-              2>/dev/null || true
-            echo “HTTP -> HTTPS redirect configured”
+          if [ “$STATUS” != “200” ]; then
+            echo “ERROR: App did not become healthy after 3 minutes”
+            exit 1
           fi
-
-          # 9. Get ALB DNS from AWS
-          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns “$ALB_ARN” \
-            --query 'LoadBalancers[0].DNSName' --output text)
-          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
-          echo “ALB DNS: $ALB_DNS”
 
       - name: Print endpoints
         run: |

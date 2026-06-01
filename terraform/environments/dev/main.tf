@@ -87,3 +87,10 @@ module "iam_lbc" {
   oidc_provider_url = module.eks.oidc_provider_url
   tags              = local.tags
 }
+
+# Self-signed ACM certificate for ALB HTTPS listener (managed by Terraform).
+module "acm" {
+  source      = "../../modules/acm"
+  common_name = "hello-platform-${var.environment}.internal"
+  tags        = local.tags
+}

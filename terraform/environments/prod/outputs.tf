@@ -42,3 +42,8 @@ output "kms_eks_key_arn" {
   description = "KMS key ARN used for EKS secrets envelope encryption"
   value       = module.kms_eks.key_arn
 }
+
+output "acm_certificate_arn" {
+  description = "ACM certificate ARN for ALB HTTPS listener"
+  value       = module.acm.certificate_arn
+}
