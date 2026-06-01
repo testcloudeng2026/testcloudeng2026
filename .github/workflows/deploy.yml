@@ -181,10 +181,10 @@ jobs:
           done
 
           # 8. Setup HTTPS listener with self-signed certificate (idempotent)
-          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
-            --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+          HTTPS_COUNT=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+            --query "length(Listeners[?Port==\`443\`])" --output text)
 
-          if [ "$HTTPS_LISTENER" = "None" ] || [ -z "$HTTPS_LISTENER" ]; then
+          if [ "$HTTPS_COUNT" = "0" ]; then
             # Generate self-signed certificate
             openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
               -keyout /tmp/key.pem -out /tmp/cert.pem \
@@ -401,10 +401,10 @@ jobs:
           done
 
           # 8. Setup HTTPS listener with self-signed certificate (idempotent)
-          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
-            --query "Listeners[?Port==\`443\`].ListenerArn | [0]" --output text)
+          HTTPS_COUNT=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+            --query "length(Listeners[?Port==\`443\`])" --output text)
 
-          if [ "$HTTPS_LISTENER" = "None" ] || [ -z "$HTTPS_LISTENER" ]; then
+          if [ "$HTTPS_COUNT" = "0" ]; then
             openssl req -x509 -newkey rsa:2048 -nodes -days 730 \
               -keyout /tmp/key.pem -out /tmp/cert.pem \
               -subj "/CN=hello-platform-prod.internal" 2>/dev/null
