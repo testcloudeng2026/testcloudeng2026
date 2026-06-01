@@ -117,26 +117,61 @@ jobs:
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Wait for ALB and healthy targets
+      - name: Register node in ALB and verify health
         run: |
-          echo "Waiting for ALB hostname..."
-          for i in $(seq 1 36); do
-            ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
-              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$ALB_DNS" ]; then
-              echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
-              echo "ALB hostname: $ALB_DNS"
+          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+          # 1. Get node instance ID and security group
+          NODE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          NODE_SG=$(aws ec2 describe-instances --instance-ids "$NODE_ID" \
+            --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
+          echo "Node: $NODE_ID  SG: $NODE_SG"
+
+          # 2. Open NodePort range from VPC CIDR (idempotent)
+          aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]" \
+            2>/dev/null || echo "NodePort rule already exists"
+
+          # 3. Get NodePort and instance-type target group
+          NODE_PORT=$(kubectl get svc hello-platform -n hello-platform \
+            -o jsonpath='{.spec.ports[0].nodePort}')
+          INSTANCE_TG_ARN=$(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?TargetType=='instance'].TargetGroupArn | [0]" --output text)
+          echo "NodePort: $NODE_PORT  TG: $INSTANCE_TG_ARN"
+
+          # 4. Update ALB listener to instance TG (idempotent)
+          ALB_ARN=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text)
+          LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+            --query 'Listeners[0].ListenerArn' --output text)
+          aws elbv2 modify-listener --listener-arn "$LISTENER_ARN" \
+            --default-actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+
+          # 5. Register node (idempotent)
+          aws elbv2 register-targets --target-group-arn "$INSTANCE_TG_ARN" \
+            --targets "Id=$NODE_ID,Port=$NODE_PORT"
+
+          # 6. Wait for healthy target
+          for i in $(seq 1 18); do
+            HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$INSTANCE_TG_ARN" \
+              --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
+            if [ "$HEALTH" = "healthy" ]; then
+              echo "Target is healthy"
               break
             fi
-            echo "Attempt $i/36 — not ready yet, waiting 10s..."
+            echo "Attempt $i/18 — state: $HEALTH, waiting 10s..."
             sleep 10
           done
-          if [ -z "$ALB_DNS" ]; then
-            echo "ERROR: ALB did not receive a hostname after 6 minutes"
-            exit 1
-          fi
-          echo "Waiting 30s for targets to register..."
-          sleep 30
+
+          # 7. Get ALB DNS from AWS (reliable, no kubectl dependency)
+          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
+            --query 'LoadBalancers[0].DNSName' --output text)
+          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
+          echo "ALB DNS: $ALB_DNS"
 
       - name: Print endpoints
         run: |
@@ -240,26 +275,61 @@ jobs:
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
-      - name: Wait for ALB and healthy targets
+      - name: Register node in ALB and verify health
         run: |
-          echo "Waiting for ALB hostname..."
-          for i in $(seq 1 36); do
-            ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
-              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$ALB_DNS" ]; then
-              echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
-              echo "ALB hostname: $ALB_DNS"
+          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
+          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+
+          # 1. Get node instance ID and security group
+          NODE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          NODE_SG=$(aws ec2 describe-instances --instance-ids "$NODE_ID" \
+            --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
+          echo "Node: $NODE_ID  SG: $NODE_SG"
+
+          # 2. Open NodePort range from VPC CIDR (idempotent)
+          aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]" \
+            2>/dev/null || echo "NodePort rule already exists"
+
+          # 3. Get NodePort and instance-type target group
+          NODE_PORT=$(kubectl get svc hello-platform -n hello-platform \
+            -o jsonpath='{.spec.ports[0].nodePort}')
+          INSTANCE_TG_ARN=$(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?TargetType=='instance'].TargetGroupArn | [0]" --output text)
+          echo "NodePort: $NODE_PORT  TG: $INSTANCE_TG_ARN"
+
+          # 4. Update ALB listener to instance TG (idempotent)
+          ALB_ARN=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].LoadBalancerArn | [0]" --output text)
+          LISTENER_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" \
+            --query 'Listeners[0].ListenerArn' --output text)
+          aws elbv2 modify-listener --listener-arn "$LISTENER_ARN" \
+            --default-actions "Type=forward,TargetGroupArn=$INSTANCE_TG_ARN"
+
+          # 5. Register node (idempotent)
+          aws elbv2 register-targets --target-group-arn "$INSTANCE_TG_ARN" \
+            --targets "Id=$NODE_ID,Port=$NODE_PORT"
+
+          # 6. Wait for healthy target
+          for i in $(seq 1 18); do
+            HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$INSTANCE_TG_ARN" \
+              --query 'TargetHealthDescriptions[0].TargetHealth.State' --output text)
+            if [ "$HEALTH" = "healthy" ]; then
+              echo "Target is healthy"
               break
             fi
-            echo "Attempt $i/36 — not ready yet, waiting 10s..."
+            echo "Attempt $i/18 — state: $HEALTH, waiting 10s..."
             sleep 10
           done
-          if [ -z "$ALB_DNS" ]; then
-            echo "ERROR: ALB did not receive a hostname after 6 minutes"
-            exit 1
-          fi
-          echo "Waiting 30s for targets to register..."
-          sleep 30
+
+          # 7. Get ALB DNS from AWS
+          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
+            --query 'LoadBalancers[0].DNSName' --output text)
+          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
+          echo "ALB DNS: $ALB_DNS"
 
       - name: Print endpoints
         run: |
