@@ -207,19 +207,46 @@ jobs:
             sleep 10
           done
 
-          # 8. Get ALB DNS from AWS
-          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
+          # 8. Ensure HTTPS listener has forwarding rule + HTTP redirects to HTTPS
+          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
+            --query “Listeners[?Port==\`443\`].ListenerArn | [0]” --output text)
+          HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
+            --query “Listeners[?Port==\`80\`].ListenerArn | [0]” --output text)
+
+          if [ -n “$HTTPS_LISTENER” ] && [ “$HTTPS_LISTENER” != “None” ]; then
+            HTTPS_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTPS_LISTENER” \
+              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
+            if [ “$HTTPS_FWD” = “None” ] || [ -z “$HTTPS_FWD” ]; then
+              aws elbv2 create-rule --listener-arn “$HTTPS_LISTENER” --priority 1 \
+                --conditions “Field=path-pattern,Values='/*'” \
+                --actions “Type=forward,TargetGroupArn=$INSTANCE_TG_ARN”
+              echo “HTTPS forwarding rule added”
+            fi
+            # Ensure HTTP redirects to HTTPS
+            HTTP_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTP_LISTENER” \
+              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
+            if [ “$HTTP_FWD” != “None” ] && [ -n “$HTTP_FWD” ]; then
+              aws elbv2 delete-rule --rule-arn “$HTTP_FWD” 2>/dev/null || true
+            fi
+            aws elbv2 modify-listener --listener-arn “$HTTP_LISTENER” \
+              --default-actions “Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}” \
+              2>/dev/null || true
+            echo “HTTP -> HTTPS redirect configured”
+          fi
+
+          # 9. Get ALB DNS from AWS
+          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns “$ALB_ARN” \
             --query 'LoadBalancers[0].DNSName' --output text)
-          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
-          echo "ALB DNS: $ALB_DNS"
+          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
+          echo “ALB DNS: $ALB_DNS”
 
       - name: Print endpoints
         run: |
-          echo "================================"
-          echo "App is LIVE with WAF + HTTPS"
-          echo "HTTPS: https://$ALB_DNS  (self-signed cert â€” browser will show a warning)"
-          echo "HTTP:  http://$ALB_DNS   (redirects to HTTPS)"
-          echo "================================"
+          echo “================================”
+          echo “App is LIVE with WAF + HTTPS”
+          echo “HTTPS: https://$ALB_DNS  (self-signed cert — browser will show a warning)”
+          echo “HTTP:  http://$ALB_DNS   (redirects to HTTPS)”
+          echo “================================”
 
   deploy-prod:
     name: Deploy to Prod
@@ -406,17 +433,44 @@ jobs:
             sleep 10
           done
 
-          # 8. Get ALB DNS from AWS
-          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ALB_ARN" \
+          # 8. Ensure HTTPS listener has forwarding rule + HTTP redirects to HTTPS
+          HTTPS_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
+            --query “Listeners[?Port==\`443\`].ListenerArn | [0]” --output text)
+          HTTP_LISTENER=$(aws elbv2 describe-listeners --load-balancer-arn “$ALB_ARN” \
+            --query “Listeners[?Port==\`80\`].ListenerArn | [0]” --output text)
+
+          if [ -n “$HTTPS_LISTENER” ] && [ “$HTTPS_LISTENER” != “None” ]; then
+            HTTPS_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTPS_LISTENER” \
+              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
+            if [ “$HTTPS_FWD” = “None” ] || [ -z “$HTTPS_FWD” ]; then
+              aws elbv2 create-rule --listener-arn “$HTTPS_LISTENER” --priority 1 \
+                --conditions “Field=path-pattern,Values='/*'” \
+                --actions “Type=forward,TargetGroupArn=$INSTANCE_TG_ARN”
+              echo “HTTPS forwarding rule added”
+            fi
+            # Ensure HTTP redirects to HTTPS
+            HTTP_FWD=$(aws elbv2 describe-rules --listener-arn “$HTTP_LISTENER” \
+              --query “Rules[?Actions[0].Type=='forward'].RuleArn | [0]” --output text)
+            if [ “$HTTP_FWD” != “None” ] && [ -n “$HTTP_FWD” ]; then
+              aws elbv2 delete-rule --rule-arn “$HTTP_FWD” 2>/dev/null || true
+            fi
+            aws elbv2 modify-listener --listener-arn “$HTTP_LISTENER” \
+              --default-actions “Type=redirect,RedirectConfig={Protocol=HTTPS,Port=443,StatusCode=HTTP_301}” \
+              2>/dev/null || true
+            echo “HTTP -> HTTPS redirect configured”
+          fi
+
+          # 9. Get ALB DNS from AWS
+          ALB_DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns “$ALB_ARN” \
             --query 'LoadBalancers[0].DNSName' --output text)
-          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
-          echo "ALB DNS: $ALB_DNS"
+          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
+          echo “ALB DNS: $ALB_DNS”
 
       - name: Print endpoints
         run: |
-          echo "================================"
-          echo "App is LIVE with WAF + HTTPS"
-          echo "HTTPS: https://$ALB_DNS  (self-signed cert â€” browser will show a warning)"
-          echo "HTTP:  http://$ALB_DNS   (redirects to HTTPS)"
-          echo "================================"
+          echo “================================”
+          echo “App is LIVE with WAF + HTTPS”
+          echo “HTTPS: https://$ALB_DNS  (self-signed cert — browser will show a warning)”
+          echo “HTTP:  http://$ALB_DNS   (redirects to HTTPS)”
+          echo “================================”
 
