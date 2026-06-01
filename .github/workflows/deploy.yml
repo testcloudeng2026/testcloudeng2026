@@ -84,6 +84,12 @@ jobs:
             --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
             --wait --timeout=5m
 
+      - name: Remove NGINX Ingress (replaced by ALB)
+        run: |
+          helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
+          kubectl delete namespace ingress-nginx --ignore-not-found=true
+          kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
+
       - name: Deploy to EKS
         run: |
           CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
@@ -126,7 +132,7 @@ jobs:
         run: |
           echo "================================"
           echo "App is LIVE with WAF protection"
-          echo "ALB + WAF: http://${{ env.ALB_DNS }}"
+          echo "ALB + WAF: http://$ALB_DNS"
           echo "================================"
 
   deploy-prod:
