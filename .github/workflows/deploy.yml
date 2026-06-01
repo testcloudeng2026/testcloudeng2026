@@ -65,16 +65,13 @@ jobs:
           docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
           docker push "$ECR_URL:${{ github.sha }}"
 
-      - name: Clean up stale controllers and webhooks
+      - name: Remove NGINX Ingress (one-time cleanup)
         run: |
           CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
           aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
           helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
           kubectl delete namespace ingress-nginx --ignore-not-found=true
           kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
-          helm uninstall aws-load-balancer-controller --namespace kube-system 2>/dev/null || true
-          kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
-          kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
 
       - name: Install AWS Load Balancer Controller
         run: |
@@ -110,9 +107,7 @@ jobs:
           sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
 
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/ --prune=false
-          kubectl delete ingress hello-platform -n hello-platform --ignore-not-found=true
-          kubectl apply -f k8s/ingress.yaml
+          kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
