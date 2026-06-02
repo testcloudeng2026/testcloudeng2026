@@ -77,12 +77,14 @@ jobs:
           kubectl delete namespace ingress-nginx --ignore-not-found=true
           kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
 
-          # Delete stale LBC webhooks so LBC regenerates a fresh TLS cert on upgrade
+          # Delete stale LBC webhooks before reinstall
           kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
           kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
 
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
+          # Note: IRSA annotation key uses single --set with all content in one quoted string
+          # to avoid shell splitting "key"="value" into two separate arguments.
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             --namespace kube-system \
             --set clusterName="$CLUSTER" \
@@ -90,13 +92,17 @@ jobs:
             --set vpcId="$VPC_ID" \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$LBC_ROLE" \
+            --set createIngressClassResource=true \
             --set enableWebhook=false \
             --wait --timeout=5m
 
-          # Ensure no stale webhook configs block kubectl apply
-          kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
-          kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+          echo "=== LBC pod status ==="
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+          echo "=== IngressClass resources ==="
+          kubectl get ingressclass
+          echo "=== LBC logs (last 30 lines) ==="
+          kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=30 2>/dev/null || true
 
       - name: Deploy to EKS
         run: |
@@ -255,7 +261,8 @@ jobs:
             --set vpcId="$VPC_ID" \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$LBC_ROLE" \
+            --set createIngressClassResource=true \
             --set enableWebhook=false \
             --wait --timeout=5m
 
