@@ -116,6 +116,13 @@ jobs:
           sed -i "s|<ENVIRONMENT>|dev|g"                   k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
+
+          # Delete the Ingress so LBC tears down the ALB and rebuilds it cleanly.
+          # Prior manual CLI modifications left the HTTPS listener without forwarding
+          # rules; a fresh LBC reconciliation is the reliable fix.
+          kubectl delete ingress hello-platform -n hello-platform --ignore-not-found=true
+          sleep 10
+
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
@@ -136,28 +143,39 @@ jobs:
 
       - name: Verify app health
         run: |
-          ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
-            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
+          # Wait for LBC to provision the ALB and populate ingress status (up to 5 min)
+          echo "Waiting for ALB hostname from LBC..."
+          for i in $(seq 1 30); do
+            ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$ALB_DNS" ]; then
+              echo "ALB hostname: $ALB_DNS"
+              break
+            fi
+            echo "Attempt $i/30 - no hostname yet, waiting 10s..."
+            sleep 10
+          done
+
           if [ -z "$ALB_DNS" ]; then
-            ALB_DNS=$(aws elbv2 describe-load-balancers \
-              --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].DNSName | [0]" \
-              --output text)
+            echo "ERROR: ALB hostname not assigned after 5 minutes"
+            exit 1
           fi
           echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
 
+          # Wait for HTTPS to respond 200 (ALB needs additional time after hostname appears)
           STATUS="000"
-          for i in $(seq 1 18); do
+          for i in $(seq 1 24); do
             STATUS=$(curl -sk -o /dev/null -w "%{http_code}" "https://${ALB_DNS}/health" 2>/dev/null || echo "000")
             if [ "$STATUS" = "200" ]; then
               echo "App is healthy (HTTPS 200)"
               break
             fi
-            echo "Attempt $i/18 - status: $STATUS, waiting 10s..."
+            echo "Attempt $i/24 - status: $STATUS, waiting 10s..."
             sleep 10
           done
 
           if [ "$STATUS" != "200" ]; then
-            echo "ERROR: App did not become healthy after 3 minutes"
+            echo "ERROR: App did not become healthy after 4 minutes"
             exit 1
           fi
 
