@@ -122,13 +122,6 @@ jobs:
           sed -i "s|<ENVIRONMENT>|dev|g"                   k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
-
-          # Delete the Ingress so LBC tears down the ALB and rebuilds it cleanly.
-          # Prior manual CLI modifications left the HTTPS listener without forwarding
-          # rules; a fresh LBC reconciliation is the reliable fix.
-          kubectl delete ingress hello-platform -n hello-platform --ignore-not-found=true
-          sleep 10
-
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
