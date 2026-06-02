@@ -298,6 +298,64 @@ Open a PR from `develop` to `main`. Requires 1 reviewer. After merge, a manual a
 
 ## Design Decisions
 
+### Terraform Architecture
+
+The core deliverable is the Terraform structure, not the application. The design follows three principles: **single-responsibility modules**, **composable environments**, and **centralized state governance**.
+
+#### Module composition pattern
+
+```
+terraform/
+├── bootstrap/          # Run once — creates the S3 + DynamoDB + KMS that back all state.
+│                       # Chicken-and-egg: must exist before terraform init can run anywhere.
+├── github-oidc/        # Run once — OIDC provider + IAM roles for GitHub Actions.
+│                       # Zero stored IAM keys. All CI/CD authenticates via OIDC federation.
+├── management/         # AWS Organizations — account + OU structure.
+│                       # Separate from workload Terraform so org changes never touch app state.
+├── modules/            # Reusable building blocks. Platform team owns these.
+│   ├── networking/     # VPC /21, subnets, IGW, NAT GW, route tables, VPC Flow Logs.
+│   ├── eks/            # EKS cluster + managed node group. Bakes in: IMDSv2 enforcement,
+│   │                   # KMS etcd encryption, OIDC provider, CloudWatch observability addon.
+│   ├── iam/            # IRSA role for the application pod. Trust policy scoped to the
+│   │                   # exact cluster OIDC issuer + namespace + service account name.
+│   ├── iam-lbc/        # IRSA role for AWS Load Balancer Controller. Separate from app IAM
+│   │                   # so the controller's AWS permissions don't bleed into the app role.
+│   ├── ecr/            # ECR repository with scan-on-push and lifecycle policy (last 10 images).
+│   ├── kms/            # KMS CMK with auto-rotation. Used for EKS etcd, EBS volumes, S3 state.
+│   ├── waf/            # WAF WebACL (REGIONAL scope). Attached to ALB via LBC annotation.
+│   ├── observability/  # CloudWatch log groups + SNS alarm + GuardDuty + CloudTrail.
+│   ├── acm/            # Self-signed ACM certificate (dev). Swap for DNS-validated in prod.
+│   └── cloudfront/     # CloudFront module — available but not currently deployed (see note).
+└── environments/       # Product team config. One folder per environment.
+    ├── dev/            # Deploys to account 196209078497. backend.tf → dev/terraform.tfstate.
+    └── prod/           # Deploys to account 590423939674. backend.tf → prod/terraform.tfstate.
+```
+
+Each `environments/<env>/main.tf` is purely compositional — it calls modules and wires their outputs together. No resource definitions live there. This enforces a clean contract: the platform team evolves modules; product teams evolve environment config.
+
+#### State architecture
+
+State lives in a **single S3 bucket in the management account** (`977145922427`). Both member accounts access it via cross-account S3 bucket policy and KMS key policy. This avoids creating a new state bucket per account (operational overhead) while keeping state isolated by key (`dev/terraform.tfstate`, `prod/terraform.tfstate`).
+
+```
+management account
+└── S3: hello-platform-tfstate-977145922427
+    ├── dev/terraform.tfstate   ← written by dev deploy role
+    └── prod/terraform.tfstate  ← written by prod deploy role
+```
+
+DynamoDB in the management account provides distributed locking — `terraform apply` in two environments simultaneously cannot corrupt each other's state.
+
+#### Variable strategy
+
+Each `environments/<env>/` has:
+- `variables.tf` — declares inputs with types and descriptions
+- `terraform.tfvars` — sets environment-specific values (region, instance type, alarm email)
+- `backend.tf` — hardcoded state bucket path (intentional — avoids interpolation in backend blocks)
+- `outputs.tf` — exposes values the CI/CD pipeline reads (`eks_cluster_name`, `ecr_repository_url`, `acm_certificate_arn`, `lbc_role_arn`)
+
+---
+
 ### AWS Organizations (multi-account)
 
 Separate AWS accounts provide blast-radius isolation that resource naming cannot:
@@ -309,7 +367,7 @@ Separate AWS accounts provide blast-radius isolation that resource naming cannot
 | Billing / cost attribution | Mixed | Per-account Cost Explorer |
 | Compliance (SCPs) | Same policies for all | Stricter SCPs on prod OU |
 
-Management account (`977145922427`) holds only Terraform state, OIDC providers, and Organizations management. No workloads run there.
+Management account holds only Terraform state, OIDC providers, and Organizations management. No workloads run there.
 
 ### Compute — EKS over ECS/Fargate
 
@@ -324,97 +382,27 @@ Amrize is migrating to GCP. Kubernetes Deployments, Services, and IRSA map 1:1 t
 
 The $100/month premium buys a portable platform that migrates to GKE without pod-level manifest rewrites.
 
-### Ingress — AWS Load Balancer Controller + WAF Regional
+### Ingress — AWS Load Balancer Controller
 
-AWS LBC creates an ALB directly from the Kubernetes Ingress resource. WAF v2 is attached directly to the ALB via the `alb.ingress.kubernetes.io/wafv2-acl-arn` annotation, providing HTTP-layer protection (SQLi, XSS, IP reputation, rate limiting) without requiring CloudFront.
-
-### WAF via ALB (not CloudFront)
-
-AWS WAF v2 Regional scope attaches directly to the ALB via the `alb.ingress.kubernetes.io/wafv2-acl-arn` annotation. Every HTTP/HTTPS request is inspected at the load balancer layer before reaching the pods. Default action is **allow** — only traffic matching a block rule is rejected.
-
-Defined in `terraform/modules/waf/main.tf`.
-
-#### WAF Rules (evaluated in priority order)
-
-| Priority | Rule | Vendor | Mode | What it blocks |
-|---|---|---|---|---|
-| 1 | `AWSManagedRulesCommonRuleSet` | AWS | Block | SQLi, XSS, path traversal, OWASP Top 10 patterns, oversized bodies |
-| 2 | `AWSManagedRulesKnownBadInputsRuleSet` | AWS | Block | Log4Shell (CVE-2021-44228), SSRF probes, exploit kit signatures |
-| 3 | `AWSManagedRulesAmazonIpReputationList` | AWS | Block | IPs from botnets, scrapers, and threat actors (Amazon TI feed) |
-| 4 | `RateLimitPerIP` (custom) | Custom | Block | More than **2,000 requests per 5-minute window** per source IP |
-
-#### Rule details
-
-**Rule 1 — CommonRuleSet**
-Covers the most common web attack patterns: SQL injection in query strings and bodies, cross-site scripting (XSS), local file inclusion (LFI), server-side request forgery patterns, and requests with oversized bodies. This is the primary OWASP Top 10 defense layer.
-
-**Rule 2 — KnownBadInputsRuleSet**
-Blocks requests matching known exploit patterns including Log4Shell payload strings in any part of the request, SSRF attempts targeting cloud metadata endpoints (169.254.169.254), and patterns associated with common exploit frameworks.
-
-**Rule 3 — AmazonIpReputationList**
-Uses Amazon's own threat intelligence feed to block traffic from IP addresses associated with botnets, anonymous proxies, Tor exit nodes, and known malicious actors. Updated continuously by AWS.
-
-**Rule 4 — RateLimitPerIP (custom)**
-Counts all requests from a single IP over a rolling 5-minute window. Requests exceeding 2,000 are blocked with HTTP 403 until the window resets. Protects against brute force, credential stuffing, and volumetric application-layer attacks.
-
-#### WAF observability
-
-All sampled requests (blocked and allowed) are captured in CloudWatch. Blocked requests include the matching rule name, source IP, and request details — visible in the WAF console under **Sampled requests** or via CloudWatch Logs if logging is enabled.
-
-### Terraform state — centralized in management account
-
-State lives in the management account S3 bucket with cross-account bucket + KMS policies allowing only the deploy roles of each member account. This avoids bootstrapping a new S3 bucket per account while keeping state isolated per environment (`dev/terraform.tfstate`, `prod/terraform.tfstate`).
+AWS LBC provisions an ALB entirely from the Kubernetes Ingress resource — no manual AWS console steps. The same Ingress annotations pattern works on GKE via the GKE Ingress controller. WAF v2 Regional scope is attached directly to the ALB via the `alb.ingress.kubernetes.io/wafv2-acl-arn` annotation (OWASP rules, Log4Shell, IP reputation, rate limiting). See `terraform/modules/waf/main.tf` for rule definitions.
 
 ### Rolling update strategy — `maxUnavailable=1, maxSurge=0`
 
-Default Kubernetes rolling update (`maxSurge=1`) would require capacity for 3 pods simultaneously on a single `t3.small` node. Setting `maxSurge=0` means one old pod is terminated before a new one starts — fitting within the node's capacity. Production should use multi-node groups where the default surge strategy works.
+Default Kubernetes rolling update (`maxSurge=1`) requires capacity for 3 pods simultaneously on a single `t3.small` node. Setting `maxSurge=0` terminates one old pod before creating the new one, fitting within the node's capacity. Production uses multi-node groups where the default surge strategy works without this constraint.
 
 ### Reusable Platform Capabilities
 
-This implementation is structured as a platform, not an application. Each layer below is designed to be standardized across Amrize's organization:
+The modules and patterns here are the standardizable artifacts. A new team onboards by creating `environments/<team>/main.tf`, calling the existing modules, and pointing `backend.tf` at the centralized state bucket. The platform team owns the modules; product teams own their environment config.
 
-#### Terraform module library (`terraform/modules/`)
-
-Each module has a single responsibility and clean input/output contracts. Any product team can compose them without understanding their internals:
-
-| Module | What teams get for free |
-|---|---|
-| `networking` | VPC sizing, subnet allocation, NAT, Flow Logs — opinionated defaults a team can override |
-| `eks` | Managed cluster with IMDSv2, KMS etcd encryption, OIDC, CW addon — hardened by default |
-| `iam` | IRSA role per service account — least-privilege pod identity without node-level keys |
-| `iam-lbc` | Load Balancer Controller IAM — teams get ingress without managing the controller themselves |
-| `waf` | 4-rule WAF WebACL (OWASP, Log4Shell, IP reputation, rate limiting) — opt-in for any ALB |
-| `observability` | CloudWatch log groups, GuardDuty, CloudTrail, SNS alarm — compliance baseline per account |
-| `kms` | CMK with auto-rotation — organizations requiring BYOK encryption get it consistently |
-| `acm` | Self-signed cert for dev; swap `aws_acm_certificate` resource for DNS-validated in prod |
-
-A new team onboards by creating a new `environments/<team>/` folder, calling these modules, and wiring a `backend.tf` to the centralized state bucket. The platform team controls the modules; product teams control their environment config.
-
-#### GitHub Actions CI/CD template
-
-The `.github/workflows/` files are a starting template any team can copy:
-- `ci.yml`: terraform plan with PR comment, Trivy blocking scan, manifest dry-run — zero AWS credentials needed for validation
-- `deploy.yml`: OIDC auth, `terraform apply`, ECR push, rolling `kubectl apply`, health check gate
-
-The OIDC pattern (`terraform/github-oidc/`) eliminates credential rotation organization-wide. One `terraform apply` per account gives any GitHub repo a short-lived deploy role with no stored secrets.
-
-#### Kubernetes namespace baseline (`k8s/`)
-
-The non-application manifests (`networkpolicy.yaml`, `resourcequota.yaml`, `poddisruptionbudget.yaml`) are the organizational defaults every new service should start with:
-- `NetworkPolicy` default-deny-all ensures no accidental lateral movement between namespaces
-- `ResourceQuota` prevents a single team from starving the cluster
-- `PodDisruptionBudget` ensures at least one pod survives voluntary node drains
-
-These could be packaged as a Helm "baseline" chart or enforced via OPA/Gatekeeper policies that apply automatically to new namespaces.
-
-#### Multi-account pattern (`terraform/management/`)
-
-The management + dev + prod account structure is the Amrize standard for new application platforms. Each new platform:
-1. Gets its own AWS Organizations accounts (isolated blast radius, per-account billing)
-2. Inherits the centralized state bucket and KMS key from the management account
-3. Gets a pre-wired OIDC deploy role — no IAM key rotation, ever
-
-This pattern scales to N teams without accumulating shared-account IAM debt.
+| Capability | Artifact | What any team gets |
+|---|---|---|
+| Hardened EKS cluster | `modules/eks/` | IMDSv2, KMS etcd encryption, OIDC, CW addon — secure by default |
+| Least-privilege pod identity | `modules/iam/` | IRSA role scoped to exact service account — no node-level keys |
+| Zero-credential CI/CD | `terraform/github-oidc/` + `ci.yml`/`deploy.yml` | OIDC federation, no stored IAM keys, ever |
+| WAF baseline | `modules/waf/` | 4-rule WebACL (OWASP, Log4Shell, IP reputation, rate limit) — opt-in per ALB |
+| Observability baseline | `modules/observability/` | Log groups, GuardDuty, CloudTrail, SNS alarm — compliance floor per account |
+| Namespace isolation | `k8s/networkpolicy.yaml` + `resourcequota.yaml` | Default-deny-all + resource caps — packageable as a Helm baseline chart |
+| Account isolation | `terraform/management/` | Per-team AWS account, isolated blast radius, per-account billing |
 
 ---
 
