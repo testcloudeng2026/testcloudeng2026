@@ -1,4 +1,4 @@
-﻿name: Deploy
+name: Deploy
 
 on:
   push:
@@ -60,7 +60,7 @@ jobs:
       - name: Push Docker image to ECR
         run: |
           ECR_URL=$(terraform -chdir=terraform/environments/dev output -raw ecr_repository_url)
-          aws ecr get-login-password --region $AWS_REGION | \
+          aws ecr get-login-password --region us-east-1 | \
             docker login --username AWS --password-stdin "$ECR_URL"
           docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
           docker push "$ECR_URL:${{ github.sha }}"
@@ -70,33 +70,39 @@ jobs:
           LBC_ROLE=$(terraform -chdir=terraform/environments/dev output -raw lbc_role_arn)
           CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
           VPC_ID=$(terraform -chdir=terraform/environments/dev output -raw vpc_id)
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1
 
           # Clean up legacy ingress-nginx if still present in the cluster
           helm uninstall ingress-nginx --namespace ingress-nginx 2>/dev/null || true
           kubectl delete namespace ingress-nginx --ignore-not-found=true
           kubectl delete validatingwebhookconfiguration ingress-nginx-admission 2>/dev/null || true
 
-          # Delete stale LBC webhooks so LBC regenerates a fresh TLS cert on upgrade
+          # Delete stale LBC webhooks before reinstall
           kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
           kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
 
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
+          # Note: IRSA annotation key uses single --set with all content in one quoted string
+          # to avoid shell splitting "key"="value" into two separate arguments.
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             --namespace kube-system \
             --set clusterName="$CLUSTER" \
-            --set region="$AWS_REGION" \
+            --set region="us-east-1" \
             --set vpcId="$VPC_ID" \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$LBC_ROLE" \
+            --set createIngressClassResource=true \
             --set enableWebhook=false \
             --wait --timeout=5m
 
-          # Ensure no stale webhook configs block kubectl apply
-          kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
-          kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+          echo "=== LBC pod status ==="
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+          echo "=== IngressClass resources ==="
+          kubectl get ingressclass
+          echo "=== LBC logs (last 30 lines) ==="
+          kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=30 2>/dev/null || true
 
       - name: Deploy to EKS
         run: |
@@ -105,72 +111,87 @@ jobs:
           APP_ROLE=$(terraform -chdir=terraform/environments/dev output -raw app_role_arn)
           WAF_ARN=$(terraform -chdir=terraform/environments/dev output -raw waf_web_acl_arn)
           CERT_ARN=$(terraform -chdir=terraform/environments/dev output -raw acm_certificate_arn)
+          echo "CLUSTER=$CLUSTER" >> $GITHUB_ENV
+          aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1
 
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
-
-          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"  k8s/deployment.yaml
-          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"     k8s/deployment.yaml
-          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"        k8s/serviceaccount.yaml
-          sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"      k8s/ingress.yaml
-          sed -i "s|<ACM_CERT_ARN>|${CERT_ARN}|g"        k8s/ingress.yaml
-          sed -i "s|<ENVIRONMENT>|dev|g"                  k8s/configmap.yaml
+          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"   k8s/deployment.yaml
+          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"      k8s/deployment.yaml
+          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"         k8s/serviceaccount.yaml
+          sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"       k8s/ingress.yaml
+          sed -i "s|<ACM_CERT_ARN>|${CERT_ARN}|g"         k8s/ingress.yaml
+          sed -i "s|<ENVIRONMENT>|dev|g"                   k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
+
+          # Delete the Ingress so LBC tears down the ALB and rebuilds it cleanly.
+          # Prior manual CLI modifications left the HTTPS listener without forwarding
+          # rules; a fresh LBC reconciliation is the reliable fix.
+          kubectl delete ingress hello-platform -n hello-platform --ignore-not-found=true
+          sleep 10
+
           kubectl apply -f k8s/
           kubectl rollout status deployment/hello-platform \
             -n hello-platform --timeout=300s
 
       - name: Open NodePort on node security group
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
-
           NODE_ID=$(aws ec2 describe-instances \
-            --filters “Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned” \
-                      “Name=instance-state-name,Values=running” \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned" \
+                      "Name=instance-state-name,Values=running" \
             --query 'Reservations[0].Instances[0].InstanceId' --output text)
-          NODE_SG=$(aws ec2 describe-instances --instance-ids “$NODE_ID” \
+          NODE_SG=$(aws ec2 describe-instances --instance-ids "$NODE_ID" \
             --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
-          echo “Node: $NODE_ID  SG: $NODE_SG”
+          echo "Node: $NODE_ID  SG: $NODE_SG"
 
-          aws ec2 authorize-security-group-ingress --group-id “$NODE_SG” \
-            --ip-permissions “IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]” \
-            2>/dev/null || echo “NodePort rule already exists”
+          aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]" \
+            2>/dev/null || echo "NodePort rule already exists"
 
       - name: Verify app health
         run: |
-          ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
-            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-          if [ -z “$ALB_DNS” ]; then
-            ALB_DNS=$(aws elbv2 describe-load-balancers \
-              --query “LoadBalancers[?contains(LoadBalancerName,'hellopla')].DNSName | [0]” \
-              --output text)
-          fi
-          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
-
-          STATUS=”000”
-          for i in $(seq 1 18); do
-            STATUS=$(curl -sk -o /dev/null -w “%{http_code}” “https://${ALB_DNS}/health” 2>/dev/null || echo “000”)
-            if [ “$STATUS” = “200” ]; then
-              echo “App is healthy (HTTPS 200)”
+          # Wait for LBC to provision the ALB and populate ingress status (up to 5 min)
+          echo "Waiting for ALB hostname from LBC..."
+          for i in $(seq 1 30); do
+            ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$ALB_DNS" ]; then
+              echo "ALB hostname: $ALB_DNS"
               break
             fi
-            echo “Attempt $i/18 — status: $STATUS, waiting 10s...”
+            echo "Attempt $i/30 - no hostname yet, waiting 10s..."
             sleep 10
           done
 
-          if [ “$STATUS” != “200” ]; then
-            echo “ERROR: App did not become healthy after 3 minutes”
+          if [ -z "$ALB_DNS" ]; then
+            echo "ERROR: ALB hostname not assigned after 5 minutes"
+            exit 1
+          fi
+          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
+
+          # Wait for HTTPS to respond 200 (ALB needs additional time after hostname appears)
+          STATUS="000"
+          for i in $(seq 1 24); do
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" "https://${ALB_DNS}/health" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "App is healthy (HTTPS 200)"
+              break
+            fi
+            echo "Attempt $i/24 - status: $STATUS, waiting 10s..."
+            sleep 10
+          done
+
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: App did not become healthy after 4 minutes"
             exit 1
           fi
 
       - name: Print endpoints
         run: |
-          echo “================================”
-          echo “App is LIVE with WAF + HTTPS”
-          echo “HTTPS: https://$ALB_DNS  (self-signed cert — browser will show a warning)”
-          echo “HTTP:  http://$ALB_DNS   (redirects to HTTPS)”
-          echo “================================”
+          echo "================================"
+          echo "App is LIVE with WAF + HTTPS"
+          echo "HTTPS: https://$ALB_DNS  (self-signed cert - browser will show a warning)"
+          echo "HTTP:  http://$ALB_DNS   (redirects to HTTPS)"
+          echo "================================"
 
   deploy-prod:
     name: Deploy to Prod
@@ -219,7 +240,7 @@ jobs:
       - name: Push Docker image to ECR
         run: |
           ECR_URL=$(terraform -chdir=terraform/environments/prod output -raw ecr_repository_url)
-          aws ecr get-login-password --region $AWS_REGION | \
+          aws ecr get-login-password --region us-east-1 | \
             docker login --username AWS --password-stdin "$ECR_URL"
           docker tag hello-platform:${{ github.sha }} "$ECR_URL:${{ github.sha }}"
           docker push "$ECR_URL:${{ github.sha }}"
@@ -229,18 +250,19 @@ jobs:
           LBC_ROLE=$(terraform -chdir=terraform/environments/prod output -raw lbc_role_arn)
           CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
           VPC_ID=$(terraform -chdir=terraform/environments/prod output -raw vpc_id)
-          aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION"
+          aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1
 
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
             --namespace kube-system \
             --set clusterName="$CLUSTER" \
-            --set region="$AWS_REGION" \
+            --set region="us-east-1" \
             --set vpcId="$VPC_ID" \
             --set serviceAccount.create=true \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn"="$LBC_ROLE" \
+            --set "serviceAccount.annotations.eks\.amazonaws\.com/role-arn=$LBC_ROLE" \
+            --set createIngressClassResource=true \
             --set enableWebhook=false \
             --wait --timeout=5m
 
@@ -255,15 +277,15 @@ jobs:
           APP_ROLE=$(terraform -chdir=terraform/environments/prod output -raw app_role_arn)
           WAF_ARN=$(terraform -chdir=terraform/environments/prod output -raw waf_web_acl_arn)
           CERT_ARN=$(terraform -chdir=terraform/environments/prod output -raw acm_certificate_arn)
+          echo "CLUSTER=$CLUSTER" >> $GITHUB_ENV
+          aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1
 
-          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
-
-          sed -i “s|<ECR_REPOSITORY_URL>|${ECR_URL}|g”  k8s/deployment.yaml
-          sed -i “s|<IMAGE_TAG>|${{ github.sha }}|g”     k8s/deployment.yaml
-          sed -i “s|<APP_ROLE_ARN>|${APP_ROLE}|g”        k8s/serviceaccount.yaml
-          sed -i “s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g”      k8s/ingress.yaml
-          sed -i “s|<ACM_CERT_ARN>|${CERT_ARN}|g”        k8s/ingress.yaml
-          sed -i “s|<ENVIRONMENT>|prod|g”                 k8s/configmap.yaml
+          sed -i "s|<ECR_REPOSITORY_URL>|${ECR_URL}|g"   k8s/deployment.yaml
+          sed -i "s|<IMAGE_TAG>|${{ github.sha }}|g"      k8s/deployment.yaml
+          sed -i "s|<APP_ROLE_ARN>|${APP_ROLE}|g"         k8s/serviceaccount.yaml
+          sed -i "s|<WAF_WEB_ACL_ARN>|${WAF_ARN}|g"       k8s/ingress.yaml
+          sed -i "s|<ACM_CERT_ARN>|${CERT_ARN}|g"         k8s/ingress.yaml
+          sed -i "s|<ENVIRONMENT>|prod|g"                  k8s/configmap.yaml
 
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/
@@ -272,53 +294,50 @@ jobs:
 
       - name: Open NodePort on node security group
         run: |
-          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name)
-          aws eks update-kubeconfig --name “$CLUSTER” --region “$AWS_REGION”
-
           NODE_ID=$(aws ec2 describe-instances \
-            --filters “Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned” \
-                      “Name=instance-state-name,Values=running” \
+            --filters "Name=tag:kubernetes.io/cluster/${CLUSTER},Values=owned" \
+                      "Name=instance-state-name,Values=running" \
             --query 'Reservations[0].Instances[0].InstanceId' --output text)
-          NODE_SG=$(aws ec2 describe-instances --instance-ids “$NODE_ID” \
+          NODE_SG=$(aws ec2 describe-instances --instance-ids "$NODE_ID" \
             --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' --output text)
-          echo “Node: $NODE_ID  SG: $NODE_SG”
+          echo "Node: $NODE_ID  SG: $NODE_SG"
 
-          aws ec2 authorize-security-group-ingress --group-id “$NODE_SG” \
-            --ip-permissions “IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]” \
-            2>/dev/null || echo “NodePort rule already exists”
+          aws ec2 authorize-security-group-ingress --group-id "$NODE_SG" \
+            --ip-permissions "IpProtocol=tcp,FromPort=30000,ToPort=32767,IpRanges=[{CidrIp=10.0.0.0/21,Description=ALB-to-NodePort}]" \
+            2>/dev/null || echo "NodePort rule already exists"
 
       - name: Verify app health
         run: |
           ALB_DNS=$(kubectl get ingress hello-platform -n hello-platform \
             -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-          if [ -z “$ALB_DNS” ]; then
+          if [ -z "$ALB_DNS" ]; then
             ALB_DNS=$(aws elbv2 describe-load-balancers \
-              --query “LoadBalancers[?contains(LoadBalancerName,'hellopla')].DNSName | [0]” \
+              --query "LoadBalancers[?contains(LoadBalancerName,'hellopla')].DNSName | [0]" \
               --output text)
           fi
-          echo “ALB_DNS=$ALB_DNS” >> $GITHUB_ENV
+          echo "ALB_DNS=$ALB_DNS" >> $GITHUB_ENV
 
-          STATUS=”000”
+          STATUS="000"
           for i in $(seq 1 18); do
-            STATUS=$(curl -sk -o /dev/null -w “%{http_code}” “https://${ALB_DNS}/health” 2>/dev/null || echo “000”)
-            if [ “$STATUS” = “200” ]; then
-              echo “App is healthy (HTTPS 200)”
+            STATUS=$(curl -sk -o /dev/null -w "%{http_code}" "https://${ALB_DNS}/health" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "App is healthy (HTTPS 200)"
               break
             fi
-            echo “Attempt $i/18 — status: $STATUS, waiting 10s...”
+            echo "Attempt $i/18 - status: $STATUS, waiting 10s..."
             sleep 10
           done
 
-          if [ “$STATUS” != “200” ]; then
-            echo “ERROR: App did not become healthy after 3 minutes”
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: App did not become healthy after 3 minutes"
             exit 1
           fi
 
       - name: Print endpoints
         run: |
-          echo “================================”
-          echo “App is LIVE with WAF + HTTPS”
-          echo “HTTPS: https://$ALB_DNS  (self-signed cert — browser will show a warning)”
-          echo “HTTP:  http://$ALB_DNS   (redirects to HTTPS)”
-          echo “================================”
+          echo "================================"
+          echo "App is LIVE with WAF + HTTPS"
+          echo "HTTPS: https://$ALB_DNS  (self-signed cert - browser will show a warning)"
+          echo "HTTP:  http://$ALB_DNS   (redirects to HTTPS)"
+          echo "================================"
 
