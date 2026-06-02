@@ -104,15 +104,14 @@ All three checks must pass before a PR can be merged.
 
 Full deploy to account `196209078497`:
 
-1. `terraform apply` — creates/updates VPC, EKS, ECR, IAM, observability, WAF Regional, LBC IAM role
-2. Docker build + Trivy scan (blocking)
-3. Push image to ECR tagged with `github.sha`
-4. Install AWS Load Balancer Controller via Helm (idempotent)
+1. `terraform apply` — creates/updates VPC, EKS, ECR, IAM, observability, WAF Regional, LBC IAM role, ACM self-signed cert
+2. Docker build + Trivy scan (blocking — HIGH/CRITICAL CVEs fail the pipeline)
+3. Push image to ECR tagged with `github.sha` (never `latest`)
+4. Install AWS Load Balancer Controller via Helm (idempotent `helm upgrade --install`)
 5. `kubectl apply` — deploys to EKS with rolling update (`maxUnavailable=1, maxSurge=0`)
-6. Open NodePort range in node SG + register node in ALB target group + wire forwarding rule
-7. Setup HTTPS listener (self-signed cert via ACM) + HTTP→HTTPS redirect (idempotent)
-8. Wait for target healthy (up to 3 min)
-9. Prints live HTTPS endpoint
+6. LBC reconciles the Ingress → provisions ALB with WAF Regional attached, HTTPS listener with ACM cert, HTTP→HTTPS redirect
+7. Wait for ALB hostname (up to 5 min) + HTTPS health check (up to 4 min)
+8. Prints live HTTPS endpoint
 
 ### On merge to `main` (`deploy.yml` — Deploy to Prod)
 
@@ -370,6 +369,53 @@ State lives in the management account S3 bucket with cross-account bucket + KMS 
 
 Default Kubernetes rolling update (`maxSurge=1`) would require capacity for 3 pods simultaneously on a single `t3.small` node. Setting `maxSurge=0` means one old pod is terminated before a new one starts — fitting within the node's capacity. Production should use multi-node groups where the default surge strategy works.
 
+### Reusable Platform Capabilities
+
+This implementation is structured as a platform, not an application. Each layer below is designed to be standardized across Amrize's organization:
+
+#### Terraform module library (`terraform/modules/`)
+
+Each module has a single responsibility and clean input/output contracts. Any product team can compose them without understanding their internals:
+
+| Module | What teams get for free |
+|---|---|
+| `networking` | VPC sizing, subnet allocation, NAT, Flow Logs — opinionated defaults a team can override |
+| `eks` | Managed cluster with IMDSv2, KMS etcd encryption, OIDC, CW addon — hardened by default |
+| `iam` | IRSA role per service account — least-privilege pod identity without node-level keys |
+| `iam-lbc` | Load Balancer Controller IAM — teams get ingress without managing the controller themselves |
+| `waf` | 4-rule WAF WebACL (OWASP, Log4Shell, IP reputation, rate limiting) — opt-in for any ALB |
+| `observability` | CloudWatch log groups, GuardDuty, CloudTrail, SNS alarm — compliance baseline per account |
+| `kms` | CMK with auto-rotation — organizations requiring BYOK encryption get it consistently |
+| `acm` | Self-signed cert for dev; swap `aws_acm_certificate` resource for DNS-validated in prod |
+
+A new team onboards by creating a new `environments/<team>/` folder, calling these modules, and wiring a `backend.tf` to the centralized state bucket. The platform team controls the modules; product teams control their environment config.
+
+#### GitHub Actions CI/CD template
+
+The `.github/workflows/` files are a starting template any team can copy:
+- `ci.yml`: terraform plan with PR comment, Trivy blocking scan, manifest dry-run — zero AWS credentials needed for validation
+- `deploy.yml`: OIDC auth, `terraform apply`, ECR push, rolling `kubectl apply`, health check gate
+
+The OIDC pattern (`terraform/github-oidc/`) eliminates credential rotation organization-wide. One `terraform apply` per account gives any GitHub repo a short-lived deploy role with no stored secrets.
+
+#### Kubernetes namespace baseline (`k8s/`)
+
+The non-application manifests (`networkpolicy.yaml`, `resourcequota.yaml`, `poddisruptionbudget.yaml`) are the organizational defaults every new service should start with:
+- `NetworkPolicy` default-deny-all ensures no accidental lateral movement between namespaces
+- `ResourceQuota` prevents a single team from starving the cluster
+- `PodDisruptionBudget` ensures at least one pod survives voluntary node drains
+
+These could be packaged as a Helm "baseline" chart or enforced via OPA/Gatekeeper policies that apply automatically to new namespaces.
+
+#### Multi-account pattern (`terraform/management/`)
+
+The management + dev + prod account structure is the Amrize standard for new application platforms. Each new platform:
+1. Gets its own AWS Organizations accounts (isolated blast radius, per-account billing)
+2. Inherits the centralized state bucket and KMS key from the management account
+3. Gets a pre-wired OIDC deploy role — no IAM key rotation, ever
+
+This pattern scales to N teams without accumulating shared-account IAM debt.
+
 ---
 
 ## Observability
@@ -438,17 +484,32 @@ Every image is tagged with `github.sha` and retained in ECR (lifecycle policy ke
 
 ---
 
-## Known Limitations & Next Steps
+## Known Limitations & Deliberate Omissions
+
+The challenge explicitly rewards prioritization. The items below were either deliberately omitted or are known gaps:
+
+### Deliberate omissions
+
+| Item | Why omitted |
+|---|---|
+| Custom domain + Route53 | Requires owning a domain. Self-signed ACM cert demonstrates the TLS pattern; DNS validation is a two-line swap once a domain exists. |
+| HPA (Horizontal Pod Autoscaler) | `replicas: 2` provides basic HA. HPA is the natural next step, documented in Reliability & Operations above. |
+| Karpenter | Managed node groups are simpler to reason about. Karpenter is a prod optimization (bin-packing + spot), not a platform foundation requirement. |
+| External DNS | Automates Route53 from Ingress resources. Omitted because no custom domain exists. |
+| SCP enforcement | AWS Organizations is set up; SCPs on prod OU (deny delete KMS, deny disable CloudTrail) are the obvious next step. |
+| Secrets Manager | The app is stateless — no secrets to manage. The `iam/main.tf` grants SSM access for future secrets; Secrets Manager is one Terraform resource away. |
+
+### Scope acknowledgment
+
+The challenge says "for a dev environment, a single log group, one metric or alarm, and a working /health endpoint fully satisfies observability." This implementation goes further (GuardDuty, CloudTrail, VPC Flow Logs, multi-account). The additional investment was made to demonstrate the platform-level thinking Amrize evaluates for a Cloud Engineering Leader role — not to complete more checklist items, but to show what a durable, reusable foundation looks like. The modules and patterns are the deliverable; the hello-platform app is the vehicle.
+
+### Technical debt
 
 | Item | Status | Notes |
 |---|---|---|
-| HTTPS certificate | Self-signed (active) | Browser shows warning. Replace with ACM + custom domain for production-grade TLS |
-| Custom domain | Not implemented | Requires Route53 hosted zone; once added, ACM issues a trusted cert automatically |
-| HPA | Not implemented | `replicas: 2` provides basic HA; HPA is the obvious next step |
-| Multi-AZ NAT Gateway | Dev uses single NAT (~$45/month) | Two-line change for prod HA |
-| Karpenter | Not implemented | Replaces managed node groups for better bin-packing and spot support |
-| External DNS | Not implemented | Automates Route53 records from Ingress resources |
-| LBC auto-registration | Manual step in pipeline | Node registration is scripted; long-term fix is tagging the node SG with `elbv2.k8s.aws/cluster` |
+| HTTPS certificate | Self-signed (active) | Browser shows warning. Replace with ACM DNS-validated cert + custom domain for trusted TLS. |
+| Multi-AZ NAT Gateway | Dev uses single NAT (~$45/month) | Two-line change in `networking/main.tf` for prod HA. |
+| Dev HTTPS endpoint | ALB rebuilding after ingress-class migration | `kubernetes.io/ingress.class` annotation was deprecated in newer LBC versions; migrated to `spec.ingressClassName`. |
 
 ---
 
