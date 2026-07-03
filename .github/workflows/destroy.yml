@@ -4,11 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment to destroy"
+        description: "What to destroy"
         required: true
         type: choice
         options:
-          - dev-legacy
+          - dev
+          - prod
+          - github-oidc
+          - bootstrap
       confirm:
         description: "Type DESTROY to confirm"
         required: true
@@ -21,31 +24,147 @@ permissions:
   id-token: write
   contents: read
 
+# ── Dev ───────────────────────────────────────────────────────────────────────
 jobs:
-  destroy:
-    name: "Destroy ${{ github.event.inputs.environment }}"
-    if: github.event.inputs.confirm == 'DESTROY'
+  destroy-dev:
+    name: Destroy dev
+    if: github.event.inputs.confirm == 'DESTROY' && github.event.inputs.environment == 'dev'
     runs-on: ubuntu-latest
-    environment: management
+    environment: dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - name: Configure AWS credentials (management account)
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure AWS credentials (dev account)
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c  # v4
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Terraform Init (dev-legacy state)
+      - name: Terraform Init
         run: terraform init
         working-directory: terraform/environments/dev
+
+      - name: Delete Kubernetes namespace (lets LBC clean up ALB before tf destroy)
+        run: |
+          CLUSTER=$(terraform -chdir=terraform/environments/dev output -raw eks_cluster_name 2>/dev/null || true)
+          if [ -n "$CLUSTER" ]; then
+            aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION" 2>/dev/null || true
+            kubectl delete namespace hello-platform --ignore-not-found=true --wait=true --timeout=3m 2>/dev/null || true
+            echo "Waiting 30s for LBC to remove ALB..."
+            sleep 30
+          fi
 
       - name: Terraform Destroy
         run: terraform destroy -auto-approve
         working-directory: terraform/environments/dev
+
+# ── Prod ──────────────────────────────────────────────────────────────────────
+  destroy-prod:
+    name: Destroy prod
+    if: github.event.inputs.confirm == 'DESTROY' && github.event.inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Configure AWS credentials (prod account)
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c  # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/environments/prod
+
+      - name: Delete Kubernetes namespace (lets LBC clean up ALB before tf destroy)
+        run: |
+          CLUSTER=$(terraform -chdir=terraform/environments/prod output -raw eks_cluster_name 2>/dev/null || true)
+          if [ -n "$CLUSTER" ]; then
+            aws eks update-kubeconfig --name "$CLUSTER" --region "$AWS_REGION" 2>/dev/null || true
+            kubectl delete namespace hello-platform --ignore-not-found=true --wait=true --timeout=3m 2>/dev/null || true
+            echo "Waiting 30s for LBC to remove ALB..."
+            sleep 30
+          fi
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
+        working-directory: terraform/environments/prod
+
+# ── GitHub OIDC roles ─────────────────────────────────────────────────────────
+  destroy-github-oidc:
+    name: Destroy GitHub OIDC roles
+    if: github.event.inputs.confirm == 'DESTROY' && github.event.inputs.environment == 'github-oidc'
+    runs-on: ubuntu-latest
+    environment: management
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Configure AWS credentials (management account)
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c  # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/github-oidc
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
+        working-directory: terraform/github-oidc
+
+# ── Bootstrap (state bucket — run last) ──────────────────────────────────────
+  destroy-bootstrap:
+    name: Destroy bootstrap (state bucket)
+    if: github.event.inputs.confirm == 'DESTROY' && github.event.inputs.environment == 'bootstrap'
+    runs-on: ubuntu-latest
+    environment: management
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Configure AWS credentials (management account)
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c  # v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform (local backend — no remote state)
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Empty S3 state bucket (required before bucket deletion)
+        run: |
+          BUCKET=$(terraform -chdir=terraform/bootstrap output -raw bucket_name 2>/dev/null || echo "")
+          if [ -n "$BUCKET" ]; then
+            echo "Emptying bucket: $BUCKET"
+            aws s3 rm "s3://$BUCKET" --recursive 2>/dev/null || true
+          fi
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/bootstrap
+
+      - name: Terraform Destroy
+        run: terraform destroy -auto-approve
+        working-directory: terraform/bootstrap
