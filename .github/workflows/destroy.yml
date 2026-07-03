@@ -129,7 +129,10 @@ jobs:
         working-directory: terraform/github-oidc
 
       - name: Terraform Destroy
-        run: terraform destroy -auto-approve
+        run: |
+          terraform destroy -auto-approve \
+            -var="github_repo=testcloudeng2026/testcloudeng2026" \
+            -var="state_bucket_name=hello-platform-tfstate-977145922427"
         working-directory: terraform/github-oidc
 
 # ── Bootstrap (state bucket — run last) ──────────────────────────────────────
